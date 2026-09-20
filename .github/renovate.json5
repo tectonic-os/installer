@@ -1,0 +1,18 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:best-practices",
+  ],
+
+  "rebaseWhen": "never",
+  "timezone": "Etc/UTC",
+  "schedule": ["before 6am"],
+
+  "packageRules": [
+    {
+      "matchPackageNames": ["*"],
+      "groupName": "scheduled updates",
+      "automerge": true,
+    },
+  ],
+}
