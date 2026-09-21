@@ -14,5 +14,15 @@
       "groupName": "scheduled updates",
       "automerge": true,
     },
+    {
+      // The release workflow builds in `centos-bootc:stream10` because it
+      // carries the oldest glibc of any rpm row in `COVERAGE.md`, and that
+      // glibc is the floor of every released binary. An automerged bump of
+      // the build base raises the floor with nobody reading it. The release
+      // workflow asserts the floor as well, so this rule removes the noise
+      // rather than the guard.
+      "matchDepTypes": ["container"],
+      "enabled": false,
+    },
   ],
 }
