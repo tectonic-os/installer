@@ -1,0 +1,164 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+# Read only at the workflow level. The build legs compile third-party crates
+# and run their build scripts, so a write scope there would put a release
+# credential inside the thing being built. The release job below grants itself
+# what it needs.
+permissions:
+  contents: read
+
+jobs:
+  # `tect` releases a static musl tarball and this binary cannot. Static musl
+  # cannot `dlopen`, and loading libfdisk from the live environment is why this
+  # crate was split out of `tect`. So the release is dynamically linked, and
+  # the glibc it builds against becomes the oldest glibc it can run on.
+  build:
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+            machine: x86-64
+          # A native arm runner, because a dynamic glibc target carries no crt
+          # objects of its own for the linker to borrow. `tect`'s workflow
+          # cross-links aarch64 for exactly that reason and this one cannot.
+          # `ubuntu-24.04-arm` is free on public repositories, generally
+          # available since 2025-08-07, checked 2026-09-21. Recheck if the
+          # repository goes private.
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+            machine: ARM aarch64
+    runs-on: ${{ matrix.runner }}
+    # glibc is backward compatible, so the build base sets the floor. stream10
+    # at glibc 2.39 is the oldest of the nine rpm rows in `COVERAGE.md`, eight
+    # of which were run or inspected. The record is
+    # `measurements/installer-glibc-floor.md` in the tectonic-os work tree. The
+    # row it does not cover is `a user's own base`, which the media's own
+    # `RUN /usr/bin/tect-installer --version` catches as a failed ISO build.
+    container: quay.io/centos-bootc/centos-bootc:stream10
+    steps:
+      # The base image carries no git and no cargo, so this runs before the
+      # checkout that needs one of them. binutils is named rather than left to
+      # arrive under cargo, because the floor assertion below needs `readelf`.
+      - name: Install the build tools
+        run: dnf install -y --setopt=install_weak_deps=False cargo git jq file tar gzip binutils
+
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # This leg pushes nothing and fetches the `common` pin anonymously
+          # from a public repository. Left at its default, the checkout writes
+          # the job token into `.git/config`, where a compromised build script
+          # in the crate graph reads it.
+          persist-credentials: false
+
+      - name: Verify tag matches package version
+        run: |
+          set -euo pipefail
+          version="$(cargo metadata --no-deps --format-version 1 \
+            | jq -er '.packages[] | select(.name == "installer") | .version')"
+          [ "${GITHUB_REF_NAME}" = "v${version}" ] \
+            || { echo "tag ${GITHUB_REF_NAME} does not match package version ${version}" >&2; exit 1; }
+
+      - name: Build
+        run: cargo build --profile dist --locked
+
+      - name: Package with checksums
+        env:
+          ARCH: ${{ matrix.arch }}
+          MACHINE: ${{ matrix.machine }}
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          bin=target/dist/tect-installer
+          # Printed once, so a failing assertion below has the output it
+          # disagreed with in the log above it.
+          file "$bin"
+          # `tect`'s own package step asserts `static` and this one asserts the
+          # opposite. A binary with no interpreter cannot load libfdisk at run
+          # time, so a static build here means the split did not hold.
+          file "$bin" | grep -q "${MACHINE}"
+          file "$bin" | grep -q interpreter
+          # An `if` and not a negated pipeline, because `!` skips errexit and
+          # a broken `file` would then read as a passing assertion.
+          if file "$bin" | grep -q static; then
+            echo "${bin} is statically linked and cannot load libfdisk" >&2
+            exit 1
+          fi
+          # Renovate extracts a job's `container:` image and this repository
+          # automerges every update it opens, so a newer build base can arrive
+          # unread and raise the glibc every released binary needs. The three
+          # assertions above all pass on such a binary. This one does not.
+          # aarch64 glibc versions its symbols from 2.17, so the test is that
+          # the floor is not exceeded rather than that it is matched.
+          floor=GLIBC_2.39
+          needs="$(readelf -V "$bin" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -n1)"
+          if [ "$(printf '%s\n%s\n' "$needs" "$floor" | sort -V | tail -n1)" != "$floor" ]; then
+            echo "${bin} needs ${needs}, above the measured floor ${floor}" >&2
+            exit 1
+          fi
+          asset="tect-installer-v${version}-${ARCH}-linux-gnu.tar.gz"
+          # The binary sits at the top level of the tarball with nothing beside
+          # it. `tect`'s tarball carries the `assets/` tree its `init` writes
+          # and this crate has no such tree. The media must extract this
+          # archive without `--strip-components`, which the `fetch()` helper in
+          # `emit/installer.Containerfile` passes for GitHub source archives.
+          # Against a single top-level file that flag extracts nothing and
+          # still exits 0.
+          tar -czf "$asset" -C target/dist tect-installer
+          # Bare hex, because this is the value the media pins as a build
+          # argument beside its fisherman and tacklebox pins. Nothing pipes
+          # this file into `sha256sum -c`, which rejects a line with no
+          # filename on it.
+          sha256sum "$asset" | cut -d' ' -f1 > "${asset}.sha256"
+
+      - name: Hand the tarball to the release job
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ matrix.arch }}
+          path: |
+            tect-installer-v*-linux-gnu.tar.gz
+            tect-installer-v*-linux-gnu.tar.gz.sha256
+          if-no-files-found: error
+
+  # One release carries both architectures, so neither build job creates it.
+  # Two jobs calling `gh release create` for one tag race each other.
+  release:
+    needs: build
+    runs-on: ubuntu-24.04
+    # The scopes live on this job alone. It compiles nothing and runs no
+    # third-party build script.
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Collect both architectures
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          merge-multiple: true
+
+      # Attestation runs here rather than in the build jobs, because one call
+      # covers both tarballs and the id-token scope stays out of a job that
+      # builds crates.
+      - name: Attest the tarballs
+        uses: actions/attest-build-provenance@bd77c077858b8d561b7a36cbe48ef4cc642ca39d # v2.2.2
+        with:
+          subject-path: tect-installer-v*-linux-gnu.tar.gz
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # This job never checks out, so `gh` has no git remote to read the
+          # repository from.
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes \
+            tect-installer-v*-linux-gnu.tar.gz tect-installer-v*-linux-gnu.tar.gz.sha256
