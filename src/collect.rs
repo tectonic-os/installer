@@ -591,7 +591,7 @@ impl Answers {
                 // manual layout never reaches this arm.
                 Ok(common::ui::Filled::Opened(ROW_ENCRYPTION)) if layout.is_none() => {
                     let at = (!disk.is_empty())
-                        .then(|| partition_device(&disk, container_number(payload)));
+                        .then(|| fdisk::partname(&disk, container_number(payload)));
                     if let Some((chosen, passphrase, pin)) = edit_luks(
                         &kind,
                         &fields[ROW_PASSPHRASE].value(),

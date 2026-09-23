@@ -77,8 +77,13 @@ fn the_root_device_is_where_the_layout_put_it() {
 /// no trailing digits is refused instead of retagging another partition.
 #[test]
 fn a_partition_number_is_the_trailing_digits() {
-    assert_eq!(partition_number("/dev/vda3").expect("a number"), "3");
-    assert_eq!(partition_number("/dev/nvme0n1p12").expect("a number"), "12");
-    assert_eq!(partition_number("/dev/mmcblk0p2").expect("a number"), "2");
+    assert_eq!(partition_number("/dev/vda3").expect("a number"), 3);
+    assert_eq!(partition_number("/dev/nvme0n1p12").expect("a number"), 12);
+    assert_eq!(partition_number("/dev/mmcblk0p2").expect("a number"), 2);
     assert!(partition_number("/dev/vda").is_err());
+    // Digits that overflow `usize` are not a number. While this answered the
+    // digits themselves, the readers dropped such an entry and `apply_cuts`
+    // accepted it, so a delete the editor screen had ignored reached the disk
+    // and `sfdisk` refused it once the deletes before it had run.
+    assert!(partition_number("/dev/sda99999999999999999999").is_err());
 }

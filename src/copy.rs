@@ -379,6 +379,7 @@ pub const CLEAR_PARTS: &str = "Clear partitions";
 pub const CREATE_PART: &str = "Create partition";
 pub const NEW_PARTITION: &str = "create partition";
 pub const NEW_SIZE: &str = "size";
+pub const NEW_SIZE_NEEDED: &str = "a size is needed";
 /// The `format` column says what will be written to a partition. These two
 /// cells are the strongest answers that column takes.
 pub const CELL_REMOVE: &str = "remove";

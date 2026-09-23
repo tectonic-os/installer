@@ -8,6 +8,7 @@ mod discover;
 mod disks;
 mod editor;
 mod etcwrite;
+mod fdisk;
 mod form;
 mod lock;
 mod panel;

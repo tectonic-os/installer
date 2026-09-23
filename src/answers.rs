@@ -91,9 +91,9 @@ pub(crate) struct Created {
     /// a format.
     pub(crate) fstype: String,
     /// Names the node the partition actually got. `cut_partitions` writes it
-    /// once `sfdisk` has appended the partition, and checks it against the
-    /// node the table drew. It stays empty until then, because only the cut
-    /// knows the node for a fact.
+    /// once `sfdisk` has appended the partition, from the node the disk gives
+    /// it then. It stays empty until then, because only the cut knows the
+    /// node for a fact.
     pub(crate) device: String,
 }
 

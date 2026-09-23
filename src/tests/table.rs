@@ -128,6 +128,106 @@ fn a_created_device_follows_the_slot_it_will_get() {
     );
 }
 
+/// A delete is named by `lsblk` and a table row by `sfdisk`, and on a
+/// `/dev/disk/by-id` or `/dev/disk/by-path` disk those are two different
+/// strings for one partition. Measured 2026-09-22, `lsblk --paths` on a by-id
+/// disk returns `/dev/nvme0n1p1` while `sfdisk --dump` names its rows with
+/// `fdisk_partname`, which answers `<disk>-partN`. A `/dev/mapper` disk
+/// differs as well, for the reason `deleted_slots` records.
+///
+/// Comparing those strings made every delete match nothing. The plan then
+/// appended after partitions it was about to remove, and the install was
+/// refused by `check_created_slots` after `sfdisk` had already cut the disk.
+/// All three delete-aware readers are keyed on the slot number instead.
+#[test]
+fn a_delete_matches_its_slot_when_lsblk_and_sfdisk_name_it_differently() {
+    let dump = "label: gpt\n\
+                first-lba: 2048\n\
+                last-lba: 409566\n\
+                sector-size: 512\n\
+                /dev/disk/by-id/ata-X-part1 : start=2048, size=20480\n\
+                /dev/disk/by-id/ata-X-part2 : start=124928, size=20480\n\
+                /dev/disk/by-id/ata-X-part3 : start=22528, size=20480\n";
+    let table = super::table_of(dump);
+    assert_eq!(table.slots.len(), 3);
+    // What the editor holds: `discover::partitions` asked lsblk, which
+    // answers kernel names whatever path the user named the disk by.
+    let deletes = vec!["/dev/sda3".to_string()];
+    assert_eq!(table.surviving(&deletes), [1, 2]);
+    // `appendable` filters on the same key and takes its own arm of
+    // `cleared_by`, so it needs a partial delete of its own. Slot 2 ends
+    // highest at 145408, so removing it is the delete whose room changes.
+    // A comparison that matched nothing would measure from 145408 and refuse
+    // a create the disk has the room for.
+    let highest = vec!["/dev/sda2".to_string()];
+    assert_eq!(table.appendable(&highest), 409566 + 1 - 43008);
+    assert_ne!(table.appendable(&highest), table.appendable(&[]));
+    assert_eq!(
+        super::created_devices("/dev/disk/by-id/ata-X", &table.surviving(&deletes), 1),
+        ["/dev/disk/by-id/ata-X-part3"]
+    );
+    // Deleting every partition clears the table, which is what lets the cut
+    // write a fresh GPT label instead of appending into what it is removing.
+    let all = vec![
+        "/dev/sda1".to_string(),
+        "/dev/sda2".to_string(),
+        "/dev/sda3".to_string(),
+    ];
+    assert_eq!(table.surviving(&all), [] as [usize; 0]);
+    assert_eq!(table.appendable(&all), 409566 + 1 - 2048);
+}
+
+/// **The `/dev/mapper` paths here have no map behind them, and that is what
+/// this case pins.** `fdisk_partname` answers `<disk><N>` or `<disk>p<N>`
+/// when a node of that name exists, and it falls back to `<disk>-part<N>`
+/// only when neither probe finds one. A `/dev/disk/by-id` path reaches the
+/// same fallback in the real world, because udev names its symlinks
+/// `-part<N>`.
+///
+/// On a live `/dev/mapper` disk a partition that exists has its `kpartx` node
+/// and reads back through the matching probe. A partition the install creates
+/// has no node at prediction time, so `created_devices` falls back to
+/// `-part<N>` while `kpartx` names the real node `<disk>p<N>` for a map name
+/// ending in a digit and `<disk><N>` otherwise. The prediction and the table
+/// read back then disagree, and the install is refused after the disk is cut.
+/// The path is filed in `BACKLOG.md` and carried into block 2, which re-reads
+/// the nodes that appear. `ask_disk` returns `--disk` verbatim, so such a path
+/// reaches the cut.
+///
+/// The prediction takes util-linux's whole node rule and not the digit branch
+/// alone. A digit-only rule predicts `...p1` for a table that holds
+/// `...-part1`, so the hand-written rule it replaced failed on every
+/// `/dev/disk/by-id` path.
+#[test]
+fn a_created_device_with_no_node_beside_it_takes_the_part_branch() {
+    // `fdisk_partname` probes for a node beside the disk name before it falls
+    // back to `-part`, so the case only reads the fallback when none of these
+    // exists. A host that has one fails the assertion for a reason that has
+    // nothing to do with the rule.
+    for probe in [
+        "/dev/mapper/mydisk4",
+        "/dev/mapper/mydiskp4",
+        "/dev/mapper/mydisk5",
+        "/dev/mapper/mydiskp5",
+        "/dev/disk/by-id/wwn-0x50004",
+        "/dev/disk/by-id/wwn-0x5000p4",
+    ] {
+        assert!(
+            !std::path::Path::new(probe).exists(),
+            "{probe} exists on this host, so the fallback is not what this case reads"
+        );
+    }
+    let table = super::table_of(MEASURED_DUMP);
+    assert_eq!(
+        super::created_devices("/dev/mapper/mydisk", &table.surviving(&[]), 2),
+        ["/dev/mapper/mydisk-part4", "/dev/mapper/mydisk-part5"]
+    );
+    assert_eq!(
+        super::created_devices("/dev/disk/by-id/wwn-0x5000", &table.surviving(&[]), 1),
+        ["/dev/disk/by-id/wwn-0x5000-part4"]
+    );
+}
+
 /// A created ESP is cut as an EFI System partition. Firmware finds the ESP
 /// by its GPT type GUID. Cutting the ESP as a Linux filesystem finishes the
 /// install and leaves a machine that does not boot.
@@ -140,6 +240,91 @@ fn a_created_esp_is_cut_as_an_efi_partition() {
 
 /// The cut runs against a real `sfdisk`, on a file-backed GPT. `sfdisk`
 /// reads and writes a table in a file, so what it wrote is read back here.
+/// A delete the cut cannot number refuses the plan while the disk is still
+/// whole. The deletes used to be numbered one at a time inside the loop that
+/// cuts them, so a bad entry behind a good one left the disk part way through
+/// a plan. This asserts the table is byte-identical after the refusal, which
+/// is the outcome the guard exists for. A passing refusal on its own would
+/// not show that nothing was cut.
+#[test]
+fn a_delete_the_cut_cannot_number_takes_nothing_off_the_disk() {
+    let Ok(sfdisk) = Command::new("sfdisk").arg("--version").output() else {
+        return;
+    };
+    if !sfdisk.status.success() {
+        return;
+    }
+    let root = scratch("cut-unnamed-delete");
+    let image = root.join("disk.img");
+    std::fs::File::create(&image)
+        .and_then(|file| file.set_len(200 * 1024 * 1024))
+        .expect("a backing file");
+    let disk = image.to_string_lossy().to_string();
+    let script = "label: gpt
+size=20M, name=one
+size=20M, name=two
+";
+    let mut child = Command::new("sfdisk")
+        .args(["-q", &disk])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("sfdisk");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(script.as_bytes())
+        .expect("the starting table");
+    assert!(child.wait().expect("sfdisk").success());
+    let before = super::disk_table(&disk).expect("the table");
+
+    // The good delete comes first, so a loop that numbered each entry as it
+    // reached it would have cut slot 1 before refusing the second.
+    let layout = CustomLayout {
+        disk: disk.clone(),
+        deletes: vec![format!("{disk}1"), format!("{disk}-spare")],
+        creates: vec![Created {
+            gb: 1,
+            target: "/".to_string(),
+            fstype: "btrfs".to_string(),
+            device: String::new(),
+        }],
+        ..Default::default()
+    };
+    let err = super::apply_cuts(&layout).expect_err("a delete naming no number");
+    assert!(err.contains("names no partition number"), "{err}");
+    assert_eq!(super::disk_table(&disk).expect("the table"), before);
+
+    // Digits that overflow `usize` are the same refusal. While the readers
+    // and the cut tested what is numberable differently, this entry was
+    // dropped by the screen and accepted by the cut, so slot 1 went first and
+    // `sfdisk` refused the plan afterwards.
+    let overflowed = CustomLayout {
+        deletes: vec![format!("{disk}1"), format!("{disk}99999999999999999999")],
+        ..layout.clone()
+    };
+    let err = super::apply_cuts(&overflowed).expect_err("a delete that overflows");
+    assert!(err.contains("names no partition number"), "{err}");
+    assert_eq!(super::disk_table(&disk).expect("the table"), before);
+
+    // The cleared branch writes a fresh label rather than deleting in turn,
+    // and it never numbered a delete at all. An unnumberable entry beside a
+    // complete set of deletes was accepted there and the label was written.
+    let cleared = CustomLayout {
+        deletes: vec![
+            format!("{disk}1"),
+            format!("{disk}2"),
+            format!("{disk}-spare"),
+        ],
+        ..layout.clone()
+    };
+    let err = super::apply_cuts(&cleared).expect_err("a delete naming no number");
+    assert!(err.contains("names no partition number"), "{err}");
+    assert_eq!(super::disk_table(&disk).expect("the table"), before);
+}
+
 /// The deletes, the appends, the slot numbers and the ESP type are all
 /// checked against what the editor screen drew. A file grows no device
 /// nodes, and `cut_partitions` waits for those separately.
@@ -205,7 +390,7 @@ fn the_cut_writes_the_table_the_screen_drew() {
     assert_eq!(drew, [format!("{disk}2"), format!("{disk}4")]);
 
     let cut = super::apply_cuts(&layout).expect("the cut");
-    assert_eq!(cut, drew, "the cut must return the nodes the screen drew");
+    assert_eq!(cut, [2, 4], "the cut must return the slots the screen drew");
 
     // The assertions below read the table back from the disk, so they check
     // what `sfdisk` wrote.
@@ -314,7 +499,7 @@ fn a_partition_sfdisk_had_to_shrink_stops_the_install() {
 }
 
 #[test]
-fn a_created_node_missing_from_the_read_back_table_stops_the_install() {
+fn a_created_slot_missing_from_the_read_back_table_stops_the_install() {
     let disk = "/dev/vda";
     let layout = CustomLayout {
         disk: disk.to_string(),
@@ -326,9 +511,49 @@ fn a_created_node_missing_from_the_read_back_table_stops_the_install() {
         }],
         ..Default::default()
     };
-    let err = super::check_created_nodes(&layout, &[format!("{disk}1")], &DiskTable::default())
-        .expect_err("a missing sfdisk node must stop the install");
+    let err = super::check_created_slots(&layout, &[1], &DiskTable::default())
+        .expect_err("a missing sfdisk slot must stop the install");
     assert!(err.contains(&copy::table_already_changed(disk)), "{err}");
+}
+
+/// A `/dev/mapper` disk names a created partition only after the cut, so the
+/// screen predicts the `-part<N>` fallback and the table comes back with the
+/// kpartx name. The check keys on the slot number, which both sides agree on,
+/// and the size check reads the slot that number names.
+#[test]
+fn a_created_slot_is_checked_by_number_when_the_node_name_differs() {
+    let layout = CustomLayout {
+        disk: "/dev/mapper/mydisk".to_string(),
+        creates: vec![Created {
+            gb: 1,
+            target: "/".to_string(),
+            fstype: "btrfs".to_string(),
+            device: String::new(),
+        }],
+        ..Default::default()
+    };
+    let after = DiskTable {
+        label: "gpt".to_string(),
+        sector: 512,
+        slots: vec![Slot {
+            node: "/dev/mapper/mydisk2".to_string(),
+            number: 2,
+            start: 40960,
+            sectors: 1_000_000_000 / 512,
+        }],
+        ..Default::default()
+    };
+    assert_eq!(super::check_created_slots(&layout, &[2], &after), Ok(()));
+    let short = DiskTable {
+        slots: vec![Slot {
+            node: "/dev/mapper/mydisk2".to_string(),
+            number: 2,
+            start: 40960,
+            sectors: 1_000_000 / 512,
+        }],
+        ..after.clone()
+    };
+    assert!(super::check_created_slots(&layout, &[2], &short).is_err());
 }
 
 /// A blank disk and a `dos`-labelled disk both report no GPT span. Read
@@ -523,7 +748,7 @@ fn a_blank_and_a_dos_disk_are_cut_as_gpt() {
             ..Default::default()
         };
         let cut = super::apply_cuts(&layout).unwrap_or_else(|err| panic!("cutting {name}: {err}"));
-        assert_eq!(cut, [format!("{disk}1"), format!("{disk}2")], "{name}");
+        assert_eq!(cut, [1, 2], "{name}");
         let after = super::disk_table(&disk).expect("the table after");
         assert_eq!(after.label, "gpt", "{name} came out {}", after.label);
         assert_eq!(after.slots.len(), 2, "{name}");
@@ -583,11 +808,53 @@ fn the_derived_span_counts_in_the_disks_own_sectors() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// A node `udev` has already made is not waited for. `settled` looks before
-/// it sleeps, so the existing node costs no part of the five second budget.
+/// A node the disk already made is taken at once, without spending the
+/// settle budget. `settled_node` looks before it sleeps.
 #[test]
-fn a_node_that_exists_settles_at_once() {
-    assert!(super::settled(Path::new("/dev/null")));
+fn an_existing_node_is_taken_at_once() {
+    let root = scratch("settled-node");
+    let disk = root.join("disk.img");
+    std::fs::File::create(&disk).expect("the disk");
+    let node = root.join("disk.img1");
+    std::fs::File::create(&node).expect("the node");
+    assert_eq!(
+        super::settled_node(&disk.to_string_lossy(), 1),
+        Some(node.to_string_lossy().into_owned())
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A partition the disk never names stops the install. A file grows no device
+/// nodes, so `settled_node` spends its budget and refuses, and the install
+/// stops before the recipe names a node that is not there.
+#[test]
+fn a_cut_whose_node_never_appears_stops_the_install() {
+    let Ok(sfdisk) = Command::new("sfdisk").arg("--version").output() else {
+        return;
+    };
+    if !sfdisk.status.success() {
+        return;
+    }
+    let root = scratch("cut-node-wait");
+    let image = root.join("disk.img");
+    std::fs::File::create(&image)
+        .and_then(|file| file.set_len(8 * 1024 * 1024 * 1024))
+        .expect("a backing file");
+    let disk = image.to_string_lossy().to_string();
+    let mut layout = CustomLayout {
+        disk: disk.clone(),
+        creates: vec![Created {
+            gb: 1,
+            target: "/".to_string(),
+            fstype: "btrfs".to_string(),
+            device: String::new(),
+        }],
+        ..Default::default()
+    };
+    layout.confirmed = Some(super::disk_state(&disk).expect("the disk state"));
+    let err = super::cut_partitions(&mut layout).expect_err("no node grows on a file");
+    assert!(err.contains("no device node appeared"), "{err}");
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// A layout that plans no delete and no create runs no `sfdisk` at all. The

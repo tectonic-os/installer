@@ -13,11 +13,11 @@ pub(crate) struct Slot {
     pub(crate) sectors: u64,
 }
 
-/// A disk's partition table as `sfdisk --dump` reports it. Every field counts
-/// sectors, because `--dump` is `sfdisk`'s own input format and the cut is
-/// handed those same units. `sfdisk --json` reports the same table, but
-/// `common::json` parses a number into `u32`, and a disk over 2 TiB holds more
-/// sectors than a `u32` counts.
+/// A disk's partition table, read through `libfdisk`. The span and each slot
+/// size count sectors, because that is the unit libfdisk reports and the
+/// append arithmetic multiplies by the sector size. A disk over 2 TiB holds
+/// more sectors than a `u32` counts, which is why the reader is not
+/// `sfdisk --json`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct DiskTable {
     /// `first` and `last` bound the sectors a partition may occupy, and
@@ -26,9 +26,9 @@ pub(crate) struct DiskTable {
     pub(crate) first: u64,
     pub(crate) last: u64,
     pub(crate) sector: u64,
-    /// The table label `sfdisk` reports, `gpt` or `dos`, and empty for a disk
-    /// that carries no table. `wrong_label_for` refuses a create on a `dos`
-    /// label the plan does not clear.
+    /// The table label the reader reports, `gpt` or `dos`, and empty for a
+    /// disk that carries no table. `wrong_label_for` refuses a create on a
+    /// `dos` label the plan does not clear.
     pub(crate) label: String,
     pub(crate) slots: Vec<Slot>,
 }
@@ -64,12 +64,13 @@ impl DiskTable {
         // instead of appending, so the room is the whole usable disk. A blank
         // disk takes this branch too, because it leaves no surviving partition
         // to measure from.
+        let gone = deleted_slots(deletes);
         let end = match self.cleared_by(deletes) {
             true => self.first,
             false => self
                 .slots
                 .iter()
-                .filter(|slot| !deletes.contains(&slot.node))
+                .filter(|slot| !gone.contains(&slot.number))
                 .map(|slot| slot.start.saturating_add(slot.sectors))
                 .max()
                 .unwrap_or(self.first)
@@ -82,7 +83,8 @@ impl DiskTable {
     /// cleared table lets the cut write a fresh GPT label instead of appending
     /// into the surviving partitions.
     fn cleared_by(&self, deletes: &[String]) -> bool {
-        self.slots.is_empty() || self.slots.iter().all(|slot| deletes.contains(&slot.node))
+        let gone = deleted_slots(deletes);
+        self.slots.is_empty() || self.slots.iter().all(|slot| gone.contains(&slot.number))
     }
 
     /// Why this disk cannot take a created partition beside the ones it keeps.
@@ -116,12 +118,59 @@ impl DiskTable {
     /// The slot numbers that survive the planned deletes, which is what
     /// `appended_slots` predicts the new numbers from.
     pub(crate) fn surviving(&self, deletes: &[String]) -> Vec<usize> {
+        let gone = deleted_slots(deletes);
         self.slots
             .iter()
-            .filter(|slot| !deletes.contains(&slot.node))
+            .filter(|slot| !gone.contains(&slot.number))
             .map(|slot| slot.number)
             .collect()
     }
+}
+
+/// The slot numbers a delete list names.
+///
+/// The two sides of a delete are named by different tools. `layout.deletes`
+/// holds the `NAME` `lsblk --paths` gave a partition. `DiskTable.slots[].node`
+/// holds the `fdisk_partname` name, which the reader takes from libfdisk and
+/// `sfdisk --dump` prints for its own rows. The two strings differ whenever
+/// the user names the disk by a `/dev/disk/by-id` or `/dev/disk/by-path`
+/// path. lsblk answers `/dev/nvme0n1p3` there and `fdisk_partname` answers
+/// `<disk>-part3`. Measured 2026-09-22 against lsblk 2.41.5 and libfdisk
+/// 2.41.5.
+///
+/// A `/dev/mapper` disk differs for its own reason. lsblk reports a
+/// device-mapper device under its `/dev/mapper` name and keeps the kernel
+/// name in `KNAME`, which `discover::partitions` does not ask for, and kpartx
+/// names the maps it creates with a delimiter the user chooses. So the two
+/// strings differ there without lsblk ever answering a kernel name.
+///
+/// What holds in every case is narrower. The trailing digits of `NAME` are
+/// the partition number, so the slot number is the one identity both tools
+/// agree on, and it is what `drawn_slots` and `appended_slots` already use.
+///
+/// Comparing the strings made every delete on such a disk match nothing. The
+/// plan then appended after partitions it was about to remove, and
+/// `check_created_slots` refused the install once `sfdisk` had cut the disk.
+///
+/// The trailing digits give the slot number on the branches that separate the
+/// number from the name. The digit branch inserts `p`, so partition 1 of
+/// `/dev/disk/by-uuid/abcd1234` is `/dev/disk/by-uuid/abcd1234p1`, and the
+/// `-part` branch ends in a letter. The `<disk><N>` probe is the exception,
+/// because it answers a node that can belong to another map. With
+/// `/dev/mapper/pool21` present, `/dev/mapper/pool2` partition 1 reads as slot
+/// 21, while `kpartx` and `lsblk` name the real partition `pool2p1` as slot 1.
+/// A delete on such a disk then matches nothing, and the plan can append after
+/// a partition it removes. Filed in `BACKLOG.md`.
+///
+/// If a delete carries no trailing digits, or digits that overflow `usize`,
+/// this drops it. `apply_cuts` refuses that same entry before it writes the
+/// disk, and both sides ask `partition_number`, so neither can accept an
+/// entry the other rejects.
+fn deleted_slots(deletes: &[String]) -> Vec<usize> {
+    deletes
+        .iter()
+        .filter_map(|device| partition_number(device).ok())
+        .collect()
 }
 
 /// The slot numbers `sfdisk --append` hands `count` created partitions.
@@ -131,9 +180,9 @@ impl DiskTable {
 ///
 /// The rule takes the surviving slot numbers rather than a `DiskTable`,
 /// because two callers hold two sources for them and must not answer
-/// differently. The editor screen holds `lsblk`'s partitions. The cut holds
-/// `sfdisk`'s table. A node drawn on the screen that the cut does not produce
-/// is the defect this rule exists to avoid.
+/// differently. The editor screen holds `lsblk`'s partitions, and the cut
+/// holds the slot numbers `disk_table` read. A node drawn on the screen that
+/// the cut does not produce is the defect this rule exists to avoid.
 ///
 /// The rule holds for GPT only. A `dos` label appending beside an extended
 /// partition numbered the new partition 5 rather than the predicted 4, so a
@@ -153,7 +202,11 @@ pub(crate) fn appended_slots(taken: &[usize], count: usize) -> Vec<usize> {
 /// Reads the key lines and partition lines of `sfdisk --dump`. An unrecognised
 /// line is skipped instead of refused, because `--dump` also carries
 /// `label-id`, `device` and `grain`, and a new key in a later util-linux must
-/// not stop an install.
+/// not stop the comparison.
+///
+/// The dump parser serves `sfdisk_table` and the tests alone, because the
+/// install reads its table through `disk_table`.
+#[cfg(test)]
 pub(crate) fn table_of(dump: &str) -> DiskTable {
     let mut table = DiskTable::default();
     for line in dump.lines() {
@@ -170,9 +223,6 @@ pub(crate) fn table_of(dump: &str) -> DiskTable {
         } else if let Some((node, fields)) = line.split_once(" : ") {
             let node = node.trim().to_string();
             let Ok(at) = partition_number(&node) else {
-                continue;
-            };
-            let Ok(at) = at.parse::<usize>() else {
                 continue;
             };
             let field = |key: &str| {
@@ -198,10 +248,31 @@ pub(crate) fn table_of(dump: &str) -> DiskTable {
     table
 }
 
+/// The path a device name is read at. A path outside `/dev` is returned
+/// unchanged. In a debug build `env::dev` renames the `/dev` directory, so a
+/// fixture run can hold a disk as a regular file. A released installer reads
+/// the name itself, which keeps a fixture from aiming a real install at
+/// another directory.
+fn device_path(disk: &str) -> String {
+    match (cfg!(debug_assertions), disk.strip_prefix("/dev/")) {
+        (true, Some(name)) => env::dev().join(name).to_string_lossy().into_owned(),
+        _ => disk.to_string(),
+    }
+}
+
 /// The disk's table, read fresh. Every caller reads it again instead of
 /// caching, because the editor screen is live and a disk the user swapped
 /// carries different slots.
 pub(crate) fn disk_table(disk: &str) -> Result<DiskTable, String> {
+    fdisk::read_table(&device_path(disk))
+}
+
+/// The `sfdisk`-backed reader the install path ran before `libfdisk`. It
+/// serves `src/tests/fdisk.rs` as the comparison side for `disk_table`, the
+/// way `table_of` serves it as the dump parser. It goes when the two readers
+/// stop being worth comparing.
+#[cfg(test)]
+pub(crate) fn sfdisk_table(disk: &str) -> Result<DiskTable, String> {
     let out = Command::new("sfdisk")
         .args(["--dump", disk])
         // `unpartitioned_dump` matches an English diagnostic, so the locale
@@ -211,7 +282,7 @@ pub(crate) fn disk_table(disk: &str) -> Result<DiskTable, String> {
         .output()
         .map_err(|err| format!("sfdisk --dump {disk}: {err}"))?;
     // An unpartitioned disk is not a failure here. It has no table to dump,
-    // and it is the disk the user is most likely to cut partitions on.
+    // and the comparison cases cut one.
     let stderr = String::from_utf8_lossy(&out.stderr);
     let mut table = match out.status.success() {
         true => table_of(&String::from_utf8_lossy(&out.stdout)),
@@ -224,27 +295,25 @@ pub(crate) fn disk_table(disk: &str) -> Result<DiskTable, String> {
         }
     };
     // `first-lba` and `last-lba` are GPT keys. A `dos` dump carries neither,
-    // and a disk with no table carries neither. Without them the append
-    // arithmetic refuses every create on such a disk for no room, including
-    // the blank disk the user is most likely to cut. The span filled in here
-    // is GPT's own, from the first aligned sector to the last sector before
-    // the secondary header's 33-sector reserve.
+    // and a disk with no table carries neither. The fill below is what the
+    // install reader did, and the comparison cases cover the blank and `dos`
+    // disks that need it. The span is GPT's own, from the first aligned
+    // sector to the last sector before the secondary header's 33-sector
+    // reserve.
     if table.last == 0 {
         table.first = 2048;
         // `appendable_gb` multiplies this span by `table.sector`, so the span
         // counts the disk's own sectors. Counting a 4Kn disk in 512-byte
-        // sectors would report eight times the room it has. The form would
-        // then accept a root the disk cannot hold, the deletes would be
-        // written, and `sfdisk` would shrink the root silently. That silent
-        // shrink is the one outcome the conservative arithmetic exists to
-        // prevent.
+        // sectors reports eight times the room it has, which is the divergence
+        // the 4Kn comparison case pins.
         table.last = disk_sectors(disk, table.sector).saturating_sub(34);
     }
     Ok(table)
 }
 
 /// `sfdisk --dump` exits non-zero for an unpartitioned disk, which is not a
-/// failure the install refuses.
+/// failure this reader refuses.
+#[cfg(test)]
 fn unpartitioned_dump(stderr: &str) -> bool {
     stderr.contains("does not contain a recognized partition table")
 }
@@ -252,7 +321,7 @@ fn unpartitioned_dump(stderr: &str) -> bool {
 pub(crate) fn disk_state(disk: &str) -> Result<DiskState, String> {
     use std::os::unix::fs::MetadataExt as _;
 
-    let metadata = std::fs::metadata(disk).map_err(|err| format!("{disk}: {err}"))?;
+    let metadata = std::fs::metadata(device_path(disk)).map_err(|err| format!("{disk}: {err}"))?;
     Ok(DiskState {
         rdev: metadata.rdev(),
         dev: metadata.dev(),
@@ -291,8 +360,10 @@ impl Drop for DiskLock {
 }
 
 /// The disk's size in its own sectors, which gives the span a fresh GPT label
-/// would have. `lsblk` is how this crate asks the machine about disks, so
-/// this asks it for the size in bytes.
+/// would have. `sfdisk_table` fills a missing span with this, and the tests
+/// ask it directly. `lsblk` is how this crate asks the machine about disks,
+/// so this asks it for the size in bytes.
+#[cfg(test)]
 pub(crate) fn disk_sectors(disk: &str, sector: u64) -> u64 {
     // `table_of` reads a missing sector size as 512, so this divides by 512
     // too rather than by zero.
@@ -325,15 +396,19 @@ pub(crate) fn disk_sectors(disk: &str, sector: u64) -> u64 {
         .unwrap_or_default()
 }
 
-/// The nodes the created partitions will carry once `sfdisk` has appended
-/// them, in the order the user added them to the plan. The nodes are derived
-/// on every call and never stored, because deleting another partition frees a
-/// slot and moves them. An answer keyed by a node that moves lands on the
-/// wrong partition.
+/// The nodes the created partitions are predicted to carry once the cut has
+/// run, in the order the user added them to the plan. The editor screen draws
+/// these. The nodes are derived on every call and never stored, because
+/// deleting another partition frees a slot and moves them. An answer keyed by
+/// a node that moves lands on the wrong partition.
+///
+/// A prediction cannot know a node that exists only after the cut, which is
+/// the case on a `/dev/mapper` disk, so the cut re-reads the node instead of
+/// trusting this answer.
 pub(crate) fn created_devices(disk: &str, taken: &[usize], count: usize) -> Vec<String> {
     appended_slots(taken, count)
         .into_iter()
-        .map(|number| partition_device(disk, number))
+        .map(|number| fdisk::partname(disk, number))
         .collect()
 }
 
@@ -344,7 +419,6 @@ pub(crate) fn drawn_slots(parts: &[Partition], deletes: &[String]) -> Vec<usize>
         .iter()
         .filter(|part| !deletes.contains(&part.device))
         .filter_map(|part| partition_number(&part.device).ok())
-        .filter_map(|number| number.parse::<usize>().ok())
         .collect()
 }
 
@@ -378,34 +452,33 @@ pub(crate) fn cut_partitions(layout: &mut CustomLayout) -> Result<(), String> {
     if layout.confirmed.as_ref() != Some(&now) {
         return Err(copy::table_changed(&layout.disk));
     }
-    let devices = apply_cuts(layout)?;
-    // The slot rule is measured on util-linux 2.41.5 and never promised. A
-    // later util-linux that numbers differently would hand fisherman a node
-    // that is not there and fail with the disk already cut. The check runs
-    // here, where the failure still names the cause.
-    //
-    // The check waits instead of asserting at once. `sfdisk` tells the kernel
-    // about the new table, but `udev` makes the node, and the node is not
-    // there the instant the command exits. A real machine settles in
-    // milliseconds. The budget is generous because a wrong answer refuses an
-    // install on a disk that is already cut.
-    for (create, device) in layout.creates.iter_mut().zip(devices) {
-        if !settled(Path::new(&device)) {
+    let numbers = apply_cuts(layout)?;
+    // The node is read from the disk rather than taken from the pre-cut
+    // prediction. A `/dev/mapper` disk names its kpartx node only after the
+    // cut, and `fdisk::partname` answers the `-part<N>` fallback until a node
+    // exists. The wait covers the gap between the `sfdisk` command returning
+    // and `udev` making the node, which is milliseconds on a real machine.
+    // The budget is generous, because a wrong answer refuses an install on a
+    // disk that is already cut.
+    for (create, number) in layout.creates.iter_mut().zip(numbers) {
+        let Some(device) = settled_node(&layout.disk, number) else {
             return Err(format!(
-                "{device} was cut but has not appeared: either udev has not \
-                 made the node or sfdisk numbered the new partitions \
-                 differently than the layout drew them"
+                "partition {number} on {} was cut but no device node appeared \
+                 for it; review the disk and install again",
+                layout.disk
             ));
-        }
+        };
         create.device = device;
     }
     Ok(())
 }
 
-/// The `sfdisk` half of the cut, without the wait for device nodes. A test
-/// runs this against a file-backed table, which grows no nodes, so the table
-/// it wrote is the whole of what it did.
-pub(crate) fn apply_cuts(layout: &CustomLayout) -> Result<Vec<String>, String> {
+/// The `sfdisk` half of the cut, without the wait for device nodes. It
+/// returns the slot numbers `sfdisk` gave the created partitions, in plan
+/// order, and refuses a create the disk did not hold. A test runs this
+/// against a file-backed table, which grows no nodes, so the table it wrote
+/// is the whole of what it did.
+pub(crate) fn apply_cuts(layout: &CustomLayout) -> Result<Vec<usize>, String> {
     if layout.deletes.is_empty() && layout.creates.is_empty() {
         return Ok(Vec::new());
     }
@@ -423,27 +496,35 @@ pub(crate) fn apply_cuts(layout: &CustomLayout) -> Result<Vec<String>, String> {
     // this project's boot chain both need. A blank disk takes this branch too,
     // and the fresh label gives `--append` a table to append into.
     let cleared = table.cleared_by(&layout.deletes);
-    let devices = match cleared {
-        // A fresh GPT label numbers from 1, however the old table numbered.
-        true => created_devices(&layout.disk, &[], layout.creates.len()),
-        false => created_devices(
-            &layout.disk,
-            &table.surviving(&layout.deletes),
-            layout.creates.len(),
-        ),
+    // The cleared branch numbers from 1, however the old table numbered.
+    let numbers = match cleared {
+        true => appended_slots(&[], layout.creates.len()),
+        false => appended_slots(&table.surviving(&layout.deletes), layout.creates.len()),
     };
+    // Every delete is numbered before the disk is written, and before the
+    // branch, so the guard does not depend on which arm runs. A delete the
+    // installer cannot number used to fail inside the loop below, once the
+    // deletes before it had already run, which left the disk part way through
+    // a plan and reported only the entry it stopped on. `deleted_slots` drops
+    // such an entry, so the editor screen drew a plan the loop would refuse.
+    // `partition_number` is the one test of what is numberable, which is what
+    // keeps the readers and this loop from disagreeing about it.
+    let numbered = layout
+        .deletes
+        .iter()
+        .map(|device| partition_number(device).map(|number| (device, number)))
+        .collect::<Result<Vec<_>, _>>()?;
     match cleared {
         true => sfdisk_script(&layout.disk, &[], "label: gpt\n")?,
         false => {
-            for device in &layout.deletes {
-                let number = partition_number(device)?;
+            for (device, number) in numbered {
                 let out = Command::new("sfdisk")
-                    .args(["-q", "--delete", &layout.disk, &number])
+                    .args(["-q", "--delete", &layout.disk, &number.to_string()])
                     .output()
                     .map_err(|err| format!("sfdisk --delete: {err}"))?;
                 if !out.status.success() {
                     return Err(format!(
-                        "removing {device}: {}\n\n{}",
+                        "the cut could not remove {device}: {}\n\n{}",
                         String::from_utf8_lossy(&out.stderr).trim(),
                         copy::table_already_changed(&layout.disk)
                     ));
@@ -473,29 +554,32 @@ pub(crate) fn apply_cuts(layout: &CustomLayout) -> Result<Vec<String>, String> {
     // A root quietly smaller than the user asked for, on a disk already cut,
     // is worth stopping the install for.
     let after = disk_table(&layout.disk)?;
-    check_created_nodes(layout, &devices, &after)?;
-    Ok(devices)
+    check_created_slots(layout, &numbers, &after)?;
+    Ok(numbers)
 }
 
 /// `sfdisk` exits zero when an append names no partition at all. This reads
-/// the table `sfdisk` just wrote to decide whether each planned node exists.
-pub(crate) fn check_created_nodes(
+/// the table the cut just wrote and decides whether each planned slot exists.
+///
+/// The slot number is the key and not the node name. A created partition has
+/// no node before the cut, so the screen can only predict the name, and a
+/// `/dev/mapper` disk predicts a name the disk never gives it.
+pub(crate) fn check_created_slots(
     layout: &CustomLayout,
-    devices: &[String],
+    numbers: &[usize],
     after: &DiskTable,
 ) -> Result<(), String> {
-    for (create, device) in layout.creates.iter().zip(devices) {
+    for (create, number) in layout.creates.iter().zip(numbers) {
         // Measured 2026-09-19, a `dos` label with four primaries takes a
         // fifth `--append`, exits 0 and writes no partition. The recipe would
-        // then name a device that is not this partition, so a missing slot
-        // fails here. `cut_partitions` catches it when the node never appears,
-        // and the file-backed path this function also serves has no node to
-        // wait for.
-        let Some(slot) = after.slots.iter().find(|slot| &slot.node == device) else {
+        // then name a partition that is not there, so a missing slot fails
+        // here. `cut_partitions` catches the missing node too, and the
+        // file-backed path this function also serves has no node to wait for.
+        let Some(slot) = after.slots.iter().find(|slot| slot.number == *number) else {
             return Err(format!(
-                "{device} is not in the table sfdisk wrote, though it exited 0: \
-                 the new partitions were numbered differently than the layout \
-                 drew them\n\n{}",
+                "partition {number} is not in the partition table the cut \
+                 wrote; the disk numbered the new partitions differently than \
+                 the screen drew them\n\n{}",
                 copy::table_already_changed(&layout.disk)
             ));
         };
@@ -504,8 +588,8 @@ pub(crate) fn check_created_nodes(
         // One percent of slack covers the 1 MiB alignment `sfdisk` rounds to.
         if got < asked.saturating_sub(asked / 100) {
             return Err(format!(
-                "{device} was cut at {} GB, not the {} GB it was planned for: \
-                 sfdisk shrank it to fit and did not say so\n\n{}",
+                "partition {number} was cut at {} GB, though the plan asked \
+                 for {} GB; sfdisk shrank it to fit and did not say so\n\n{}",
                 got / 1_000_000_000,
                 create.gb,
                 copy::table_already_changed(&layout.disk)
@@ -543,26 +627,34 @@ fn sfdisk_script(disk: &str, args: &[&str], script: &str) -> Result<(), String> 
     match out.status.success() {
         true => Ok(()),
         false => Err(format!(
-            "writing the partition table on {disk}: {}\n\nthe partition table \
-             on {disk} may already have been changed",
+            "the cut could not write the partition table on {disk}: {}\n\nthe \
+             partition table on {disk} may already have been changed",
             String::from_utf8_lossy(&out.stderr).trim()
         )),
     }
 }
 
-/// How long a freshly cut partition has to appear, and how often `settled`
-/// looks for it. Five seconds is far past what a machine takes and far short
-/// of what the user would call hung.
+/// How long a freshly cut partition has to appear, and how often
+/// `settled_node` looks for it. Five seconds is far past what a machine takes
+/// and far short of what the user would call hung.
 const SETTLE: std::time::Duration = std::time::Duration::from_millis(100);
 const SETTLE_TRIES: usize = 50;
 
-/// Whether a device node is there, after giving `udev` time to make it.
-pub(crate) fn settled(device: &Path) -> bool {
+/// The node partition `number` has once the cut has reached the kernel, or
+/// `None` when no node appears within the settle budget.
+///
+/// `fdisk::partname` is asked again on every look instead of once, because
+/// its answer depends on which nodes exist. A partition the cut is about to
+/// make has no node, so the first answer is the `-part<N>` fallback. A
+/// `/dev/mapper` disk makes the node after the cut, under `<disk>p<N>` or
+/// `<disk><N>`, and a later look finds it.
+pub(crate) fn settled_node(disk: &str, number: usize) -> Option<String> {
     for _ in 0..SETTLE_TRIES {
-        if device.exists() {
-            return true;
+        let node = fdisk::partname(disk, number);
+        if Path::new(&node).exists() {
+            return Some(node);
         }
         std::thread::sleep(SETTLE);
     }
-    device.exists()
+    None
 }

@@ -474,7 +474,7 @@ fn random_key() -> Result<Vec<u8>, String> {
 /// closes the container around the table write and opens it again with the
 /// same key.
 fn retag_root(disk: &str, open: &LuksOpen, mapper: &str) -> Result<(), String> {
-    let number = partition_number(&open.partition)?;
+    let number = partition_number(&open.partition)?.to_string();
     close_volume(mapper)?;
     let out = Command::new("sfdisk")
         .args(["--part-type", disk, &number, ROOT_GUID])
@@ -492,8 +492,16 @@ fn retag_root(disk: &str, open: &LuksOpen, mapper: &str) -> Result<(), String> {
 
 /// The GPT number of a partition device, taken as the trailing digits.
 /// `/dev/vda2`, `/dev/nvme0n1p2` and `/dev/mmcblk0p2` all give 2.
-pub(crate) fn partition_number(device: &str) -> Result<String, String> {
-    let number: String = device
+///
+/// This answers a number rather than the digits it read, because every caller
+/// but two needs a number and the two that format it back are naming an
+/// `sfdisk` argument. While the digits and the number were separate steps the
+/// callers disagreed about which devices were numberable: the readers in
+/// `table.rs` dropped an entry whose digits overflow `usize` and `apply_cuts`
+/// accepted it, so a delete the editor screen had ignored was cut anyway and
+/// `sfdisk` refused it part way through the plan.
+pub(crate) fn partition_number(device: &str) -> Result<usize, String> {
+    let digits: String = device
         .chars()
         .rev()
         .take_while(char::is_ascii_digit)
@@ -501,8 +509,7 @@ pub(crate) fn partition_number(device: &str) -> Result<String, String> {
         .into_iter()
         .rev()
         .collect();
-    match number.is_empty() {
-        true => Err(format!("{device} names no partition number")),
-        false => Ok(number),
-    }
+    digits
+        .parse()
+        .map_err(|_| format!("{device} names no partition number"))
 }

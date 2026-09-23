@@ -38,6 +38,21 @@ pub(crate) fn sys_block() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(SYS_BLOCK))
 }
 
+/// Names the directory the installer opens a device path under.
+const DEV: &str = "/dev";
+
+/// `$TECT_DEV` overrides the directory, for the same reason `$TECT_SYS_BLOCK`
+/// does. The drawn golden names its disks from a fixture `/sys/block`, and
+/// the table reader opens the device instead of running a command, so the
+/// fixture must hold a file for a disk that has no node on the rig. Only
+/// `device_path` in `table.rs` reads this, and it reads it in a debug build
+/// alone.
+pub(crate) fn dev() -> PathBuf {
+    std::env::var_os("TECT_DEV")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEV))
+}
+
 /// Names the VT the kernel currently shows.
 const TTY0_ACTIVE: &str = "/sys/class/tty/tty0/active";
 

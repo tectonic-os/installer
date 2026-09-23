@@ -902,20 +902,6 @@ pub(crate) fn confirm_disk(device: &str, disks: &[(String, String)]) -> Result<b
     )
 }
 
-/// Names the device node a planned partition will carry. A disk whose own
-/// name ends in a digit takes a `p` before the number, the way the kernel
-/// names `nvme0n1p1`.
-pub(crate) fn partition_device(disk: &str, number: usize) -> String {
-    match disk
-        .chars()
-        .last()
-        .is_some_and(|last| last.is_ascii_digit())
-    {
-        true => format!("{disk}p{number}"),
-        false => format!("{disk}{number}"),
-    }
-}
-
 /// Gives the slot the LUKS container takes in the whole-disk plan. The
 /// container takes the root's slot, so the plan is read unencrypted and the
 /// row mounted at `/` is counted. The ESP and any `/boot` come before it.
@@ -1055,32 +1041,71 @@ pub(crate) fn edit_luks(
 /// accepts one and shrinks the partition silently once the deletes are
 /// written.
 pub(crate) fn ask_size(room: u64) -> Result<Option<u64>, String> {
-    let mut fields = vec![common::ui::Field::measure(copy::NEW_SIZE, "", "GB")];
-    let mut left: Vec<usize> = Vec::new();
-    let filled = common::ui::in_titled_overlay(
-        common::ui::WINDOW_WIDTH,
-        // 8 rows hold the label, the measure row and a refusal under it.
-        8,
-        copy::NEW_PARTITION,
-        || {
-            common::ui::form(
-                &mut fields,
-                &[],
-                |fields| size_short_of(&fields[0].value(), room),
-                |_| Vec::new(),
-                |_| vec![0],
-                copy::SUBMIT_KEYS,
-                &[],
-                &[],
-                0,
-                &mut left,
-            )
-        },
-    )?;
-    match filled {
-        common::ui::Filled::Took(_) => Ok(size_gb(&fields[0].value())),
-        _ => Ok(None),
+    let mut typed = String::new();
+    let mut refusal = String::new();
+    loop {
+        // The refusal rides on the next window's label, and the refused value
+        // stays in the field so the user corrects it rather than retyping it.
+        // A measure field answers with `Changed` on enter before the form's
+        // own blocked branch can draw, so `size_short_of` is asked again here
+        // and the window opens a second time with its reason.
+        let label = match refusal.is_empty() {
+            true => copy::NEW_SIZE.to_string(),
+            false => refusal.clone(),
+        };
+        let mut fields = vec![common::ui::Field::measure(&label, &typed, "GB")];
+        let mut left: Vec<usize> = Vec::new();
+        let filled = common::ui::in_titled_overlay(
+            common::ui::WINDOW_WIDTH,
+            // 8 rows hold the label and the measure row. A refusal takes the
+            // label column rather than a row of its own, because a measure
+            // field's enter leaves the window before the form can draw one.
+            8,
+            copy::NEW_PARTITION,
+            || {
+                common::ui::form(
+                    &mut fields,
+                    &[],
+                    |fields| size_short_of(&fields[0].value(), room),
+                    |_| Vec::new(),
+                    |_| vec![0],
+                    copy::SUBMIT_KEYS,
+                    &[],
+                    &[],
+                    0,
+                    &mut left,
+                )
+            },
+        )?;
+        if !submitted(filled) {
+            return Ok(None);
+        }
+        typed = fields[0].value();
+        match size_short_of(&typed, room) {
+            None => return Ok(size_gb(&typed)),
+            // An empty field's own refusal is empty, because the main form
+            // states it through the blocked button. This window has none, so
+            // the empty answer gets a reason of its own.
+            Some(said) => {
+                refusal = match said.is_empty() {
+                    true => copy::NEW_SIZE_NEEDED.to_string(),
+                    false => said,
+                }
+            }
+        }
     }
+}
+
+/// Whether the size window's key was its submit. A measure field answers with
+/// `Changed` on enter, because the main form redraws the row it sizes from
+/// that key. This window has no row to redraw and no action button to take
+/// instead, so the same key is its submit. Any other result, including the
+/// `Left` that `esc` twice returns, answers nothing.
+pub(crate) fn submitted(filled: common::ui::Filled) -> bool {
+    matches!(
+        filled,
+        common::ui::Filled::Took(_) | common::ui::Filled::Changed(_)
+    )
 }
 
 /// Says why a size cannot be taken. An empty box returns an empty refusal,

@@ -290,32 +290,39 @@ esac
     )
     .unwrap();
     std::fs::set_permissions(&lsblk, std::fs::Permissions::from_mode(0o755)).unwrap();
-    // The manual layout reads the disk's table through `sfdisk --dump` before
-    // it can offer a create. The fixture's disks do not exist on this rig, so
-    // the fixture answers with a dump that matches its `lsblk` response. A
-    // real `sfdisk` would fail here and the layout would draw an empty table.
-    let sfdisk = dir.join("sfdisk");
-    std::fs::write(
-        &sfdisk,
-        r#"#!/bin/sh
-case "$1" in
---dump) cat <<'EOF'
-label: gpt
-unit: sectors
-first-lba: 2048
-last-lba: 134217694
-sector-size: 512
-
-/dev/vda1 : start=2048, size=1048576, type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B
-/dev/vda2 : start=1050624, size=133169152, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4
-/dev/vda3 : start=134219776, size=125829120, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4
-EOF
-;;
-esac
-"#,
-    )
-    .unwrap();
-    std::fs::set_permissions(&sfdisk, std::fs::Permissions::from_mode(0o755)).unwrap();
+    // The manual layout reads the chosen disk's table through `libfdisk`,
+    // which opens the device. The fixture's disks have no node on this rig,
+    // so the fixture writes a real GPT onto a sparse file and `TECT_DEV` aims
+    // the installer's device reads at the directory holding it. The reader it
+    // replaced ran `sfdisk --dump`, which the fixture answered on `PATH`.
+    //
+    // `sfdisk` is required and not skipped. It ships with the `script` above
+    // in util-linux, and a silent return would report the whole drawn flow as
+    // passed without drawing it.
+    let dev = dir.join("dev");
+    std::fs::create_dir_all(&dev).unwrap();
+    let image = dev.join("vda");
+    std::fs::File::create(&image)
+        .and_then(|file| file.set_len(64 * 1024 * 1024 * 1024))
+        .unwrap();
+    let disk = image.to_string_lossy().to_string();
+    let mut child = std::process::Command::new("sfdisk")
+        .args(["-q", &disk])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("sfdisk from util-linux writes the fixture table");
+    {
+        use std::io::Write as _;
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"label: gpt\nsize=512M, type=U\nsize=10G\nsize=10G\n")
+            .unwrap();
+    }
+    assert!(child.wait().unwrap().success());
     // The walk over the old system mounts what the disk holds read-only. The
     // fixture answers both `mount` and `umount` and mounts nothing, because
     // the disk does not exist on this rig. A VM proof covers what the walk
@@ -367,10 +374,11 @@ esac
         // the answers the walk asserts out of the captured frames, so the pty
         // is pinned to the media console's height.
         &format!(
-            "stty rows 50 cols 80; PATH='{}':\"$PATH\" TECT_INSTALLER_LOCK='{}' TECT_SYS_BLOCK='{}' TECT_MOUNT_ROOT='{}' TECT_EFIVARS='{}' TECT_TTY0_ACTIVE='{}' '{}' --from .",
+            "stty rows 50 cols 80; PATH='{}':\"$PATH\" TECT_INSTALLER_LOCK='{}' TECT_SYS_BLOCK='{}' TECT_DEV='{}' TECT_MOUNT_ROOT='{}' TECT_EFIVARS='{}' TECT_TTY0_ACTIVE='{}' '{}' --from .",
             dir.display(),
             dir.join("installer.lock").display(),
             sys.display(),
+            dev.display(),
             dir.join("mounts").display(),
             efivars.display(),
             active.display(),

@@ -619,3 +619,32 @@ fn the_luks_window_reopens_on_the_secret_the_kind_owes() {
     assert_eq!(luks_window_start("tpm2-luks"), None);
     assert_eq!(luks_window_start(NONE), None);
 }
+
+/// The size window submits on the key its field answers with. A measure field
+/// returns `Changed` on enter, because the main form redraws the row it sizes
+/// from that key, and `ask_size` read only `Took`, so every manual create was
+/// dropped after the user typed a size and the plan never drew it. Measured
+/// 2026-09-23 on the real cut run: the window closed, no created row appeared,
+/// and the install refused with `still needs a / partition`.
+///
+/// This case pins the mapping and the guard alone. The form's own measure key
+/// is proven end to end by the manual cut in
+/// `measurements/manual-cut-2026-09-23.md`, which is where a `common` pin bump
+/// that changed what a measure's enter returns would show.
+#[test]
+fn the_size_window_submits_on_the_key_its_field_answers_with() {
+    use common::ui::Filled;
+    // The measure field's own answer is the submit. Reading only `Took` here
+    // dropped every size the user typed.
+    assert!(super::submitted(Filled::Changed(0)));
+    // The action-button answer still submits, so an overlay that grows a
+    // button later keeps working.
+    assert!(super::submitted(Filled::Took(0)));
+    // Cancel answers nothing.
+    assert!(!super::submitted(Filled::Left));
+    // The window's guard still refuses a zero, a number above the room, and
+    // an empty box, which the loop re-asks and reopens with the reason.
+    assert!(super::size_short_of("0", 100).is_some());
+    assert_eq!(super::size_short_of("20", 100), None);
+    assert!(super::size_short_of("", 100).is_some());
+}
