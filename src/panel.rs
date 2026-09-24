@@ -167,7 +167,7 @@ fn bootloader_said(payload: &Payload) -> String {
     match (payload.boot.is_empty(), payload.bootloader.as_str()) {
         (false, "systemd") => "systemd-boot with a signed UKI".to_string(),
         (false, other) => format!("{other} with a signed UKI"),
-        (true, "" | "grub2") => "grub2 (the base's vendor chain)".to_string(),
+        (true, "" | "grub2") => "grub2".to_string(),
         (true, other) => other.to_string(),
     }
 }

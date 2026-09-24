@@ -28,6 +28,12 @@ pub fn run(payload: &Payload, answers: &mut Answers, prompt: &Prompt) -> Result<
     if let Some(layout) = answers.layout.as_mut() {
         cut_partitions(layout)?;
     }
+    // The entries whose systems the plan deletes or formats go before
+    // fisherman writes the entries the image carries, so the ESP holds one
+    // set of entries and not two.
+    if let Some(layout) = answers.layout.as_ref() {
+        esp::remove(layout)?;
+    }
     // Every container the layout opens stays open for the whole of fisherman.
     // Every way out of this function closes them, including the panic path.
     let _opened = open_volumes(answers.layout.as_ref())?;

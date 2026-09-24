@@ -48,7 +48,7 @@ fn the_libfdisk_reader_agrees_with_the_sfdisk_reader() {
 /// A deleted slot leaves a hole, and an append takes the tail rather than the
 /// hole. The libfdisk reader must report the slots in the table's own order
 /// with the original numbers kept, because `appended_slots` fills the freed
-/// number and `appendable` measures the tail.
+/// number and `regions` measures the free spans.
 #[test]
 fn a_hole_and_a_reused_slot_read_the_same_through_both() {
     let script = "label: gpt\nsize=20M, name=one\nsize=20M, name=two\nsize=20M, name=three\n";
@@ -175,7 +175,7 @@ fn an_unreadable_device_is_a_refusal_and_not_an_empty_table() {
 /// secondary header and the cut then shrinks it without saying so.
 ///
 /// The extended container is a slot here and not a skipped entry, which is
-/// what `appendable` measures the tail from on a `dos` disk.
+/// what `regions` measures the free span from on a `dos` disk.
 #[test]
 fn a_dos_label_reads_the_conservative_span_through_both() {
     let script = "label: dos\nsize=20M\nsize=20M\n";
@@ -191,8 +191,8 @@ fn a_dos_label_reads_the_conservative_span_through_both() {
 
 /// A `dos` extended container reports a start and a size, so both readers list
 /// it as a slot beside its logical partitions. A reader that skipped it would
-/// lose the span every logical sits inside, and `appendable` measures the tail
-/// from the highest end it can see.
+/// lose the span every logical sits inside, and `regions` measures the free
+/// spans from the ends it can see.
 #[test]
 fn a_dos_extended_container_is_a_slot_through_both() {
     let script = "label: dos\nsize=20M, type=83\ntype=5\n";
@@ -260,7 +260,7 @@ fn loop_4kn(name: &str, bytes: u64) -> (Loop, String) {
 ///
 /// The two cannot agree exactly here. Each reserves 34 sectors for the GPT
 /// secondary header in its own sector size, so the reserve differs by 34
-/// sectors of the size gap, and the `+ 1` in `appendable` removes one of each
+/// sectors of the size gap, and the `+ 1` in `regions` removes one of each
 /// again. The difference is therefore 33 * (4096 - 512) bytes, which is
 /// 118,272 on a 512 MiB disk. This module offers the smaller room, which is
 /// the safe side. A disk too small to hold the 1 MiB alignment and the reserve
@@ -276,8 +276,8 @@ fn a_4kn_disk_with_no_label_reports_the_same_room_through_both() {
 
     assert_eq!(dumped.sector, 512, "the sfdisk reader falls back to 512");
     assert_eq!(read.sector, 4096, "libfdisk asks the device");
-    let by_dump = dumped.appendable(&[]) * dumped.sector;
-    let by_lib = read.appendable(&[]) * read.sector;
+    let by_dump = dumped.regions(&[])[0].sectors * dumped.sector;
+    let by_lib = read.regions(&[])[0].sectors * read.sector;
     assert!(
         by_dump >= by_lib,
         "the fallback reader must stay the optimistic side: {by_dump} against {by_lib}"

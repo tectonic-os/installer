@@ -74,14 +74,31 @@ pub fn table_changed(disk: &str) -> String {
 pub fn custom_not_gpt(label: &str) -> String {
     format!("this disk has a {label} partition table: clear it to use GPT")
 }
-/// `sfdisk --append` cuts only from the room after the last partition, so
-/// this figure is that room and not the disk's total free space. The form
-/// refuses the size before the confirmation, because the deletes are written
-/// before the creates and a later refusal would leave the disk wiped.
+
+/// One ESP entry the plan removes is not a name this installer may join to a
+/// path. The name comes from a directory listing, so a name that is not one
+/// path element is a defect rather than a disk state.
+pub fn esp_entry_name(entry: &str) -> String {
+    format!("`{entry}` is not one entry name under EFI")
+}
+
+/// One ESP entry the plan removes is gone from the ESP the walk read, so the
+/// disk changed while the plan was reviewed.
+pub fn esp_entry_missing(path: &str, why: &str) -> String {
+    format!("{path} is not on the ESP: {why}")
+}
+
+pub fn esp_entry_remove(path: &str, why: &str) -> String {
+    format!("removing {path}: {why}")
+}
+/// A create takes one free region of the disk, and the room a refusal states
+/// is the largest region the plan could not use. The form refuses the size
+/// before the confirmation, because the deletes are written before the
+/// creates and a later refusal would leave the disk wiped.
 pub fn custom_too_big(gb: u64) -> String {
     match gb {
         0 => "no room left on the disk for a new partition".to_string(),
-        gb => format!("only {gb} GB is free after the last partition"),
+        gb => format!("only {gb} GB is free in the largest free region"),
     }
 }
 
@@ -319,6 +336,12 @@ pub fn removing_partitions(disk: &str, count: usize) -> String {
 pub fn summary_deleted(partition: &str) -> String {
     format!("{partition}  DELETED, contents lost")
 }
+
+/// The confirmation names each ESP boot entry the install removes, because
+/// the system it belonged to is rewritten or deleted.
+pub fn summary_esp(entry: &str, partition: &str) -> String {
+    format!("{entry} boot entry on {partition} is removed")
+}
 pub fn summary_created(gb: u64, fstype: &str) -> String {
     format!("a new {gb} GB partition, format as {fstype}")
 }
@@ -360,6 +383,15 @@ pub const LAYOUT_MANUAL: &str = "manual";
 pub fn layout_headings() -> [&'static str; 5] {
     ["size", "filesystem", "format", "type", "mount"]
 }
+
+/// Gives the table's value columns their fixed widths, one per heading. The
+/// widest thing each column can hold sets its number: `100.1 GB` and the
+/// automatic plan's `the rest` the size, `luks(closed)` the filesystem, the
+/// heading alone carries the format, the longest type word (`linux`) the type,
+/// and `/var/home` the mount.
+pub fn layout_widths() -> [usize; 5] {
+    [8, 12, 6, 5, 9]
+}
 pub const ASSIGN: &str = "Assign";
 pub const UNASSIGN: &str = "Unassign";
 pub const FORMAT_ROW: &str = "Format";
@@ -371,14 +403,22 @@ pub const USE_DISK_ACTION: &str = "Use this disk";
 pub const CHOOSE_KEYS: &str =
     "\u{2191}\u{2193} navigate \u{2022} \u{23ce}  confirm \u{2022} Esc back";
 pub const RESET_CHANGES: &str = "Reset changes";
-/// These three actions change the partition table itself. `sfdisk` enacts
-/// them before fisherman runs, so they are the only answers on this screen
-/// that touch the disk early.
-pub const DELETE_PART: &str = "Delete partition";
+/// These four actions change the partition table itself. `sfdisk` enacts them
+/// before fisherman runs, so they are the only answers on this screen that
+/// touch the disk early.
+pub const DELETE_PART: &str = "Delete";
 pub const CLEAR_PARTS: &str = "Clear partitions";
 pub const CREATE_PART: &str = "Create partition";
+pub const RENAME_PART: &str = "Rename";
 pub const NEW_PARTITION: &str = "create partition";
-pub const NEW_SIZE: &str = "size";
+pub const NEW_NAME: &str = "name";
+pub const NAME_NEEDED: &str = "a name is needed";
+/// The create window asks where the partition starts and how much of the free
+/// region it takes. The start offset is measured from the region's first
+/// sector.
+pub const ROW_OFFSET: &str = "Start offset";
+pub const ROW_PARTITION_SIZE: &str = "Partition size";
+pub const ROW_AVAILABLE: &str = "Available";
 pub const NEW_SIZE_NEEDED: &str = "a size is needed";
 /// The `format` column says what will be written to a partition. These two
 /// cells are the strongest answers that column takes.
@@ -394,14 +434,16 @@ pub const CLOSE_ENCRYPTED: &str = "Close Encrypted Partition";
 pub const NO_FORMAT: &str = "Do not format";
 pub const FORMAT_TICK: &str = "\u{2713}";
 /// The filesystem column says `luks` and whether the container is open.
-/// `lsblk` reports `crypto_LUKS`, which the user has no reason to read.
-pub const LUKS_OPEN: &str = "luks (open)";
-pub const LUKS_CLOSED: &str = "luks (closed)";
+/// `lsblk` reports `crypto_LUKS`, which the user has no reason to read. The
+/// space is dropped so `luks(closed)` fits the column's twelve cells.
+pub const LUKS_OPEN: &str = "luks(open)";
+pub const LUKS_CLOSED: &str = "luks(closed)";
 pub const EFI_CELL: &str = "efi";
 
-/// The Assign list offers a partition these mount points.
-pub fn mount_points() -> [&'static str; 5] {
-    ["/boot/efi", "/", "/var", "/var/home", "/swap"]
+/// The Assign list offers a partition these mount points. `assigns` leaves
+/// `/boot` out where the target's bootloader cannot read a separate one.
+pub fn mount_points() -> [&'static str; 6] {
+    ["/boot/efi", "/", "/boot", "/var", "/var/home", "/swap"]
 }
 
 /// The `select partition format` overlay offers these, in the mock's order.
@@ -501,7 +543,7 @@ pub fn written_over(
 pub const ROW_DISK: &str = "disk";
 /// The form draws this as the table field's own label, above its columns.
 pub const DISK_SELECTION: &str = "disk selection";
-pub const ROW_HOSTNAME: &str = "computer name";
+pub const ROW_HOSTNAME: &str = "hostname";
 pub const ROW_ACCOUNT: &str = "username";
 pub const ROW_PASSWORD: &str = "password";
 pub const ROW_ENCRYPTION: &str = "encryption";
@@ -589,7 +631,7 @@ pub fn shim_steps() -> &'static str {
 /// The panel draws each section title as one short line. No row under them
 /// asks the user to read a certificate subject.
 pub const PANEL_IMAGE: &str = "OS Image";
-pub const PANEL_FIRMWARE: &str = "Detected System Firmware";
+pub const PANEL_FIRMWARE: &str = "UEFI Firmware";
 pub const PANEL_REQUIRED: &str = "Required";
 /// The form asks its sections in this order.
 pub const SETUP_OS: &str = "OS setup";
@@ -608,7 +650,7 @@ pub const FIRMWARE_UNREADABLE: &str = "state unreadable";
 /// below carries the value alone.
 pub const PLATFORM_KEY: &str = "platform key";
 pub const PLATFORM_KEY_SETUP: &str = "none (setup mode)";
-pub const PLATFORM_KEY_PRESENT: &str = "an existing platform key is present";
+pub const PLATFORM_KEY_PRESENT: &str = "existing";
 pub const PLATFORM_KEY_OWNER: &str = "the owner key";
 pub const PLATFORM_KEY_UNKNOWN: &str = "could not be read";
 pub const UKI_NEEDS_UEFI: &str = "this image needs a UEFI boot, and none was found";

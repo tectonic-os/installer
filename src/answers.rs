@@ -20,6 +20,15 @@ pub(crate) struct CustomMount {
     pub(crate) passphrase: String,
 }
 
+/// Holds one partition the plan renames before fisherman runs. The partition
+/// already exists, so the cut writes the name through `sfdisk --part-label`.
+/// A planned partition carries its name in the cut script instead.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Rename {
+    pub(crate) partition: String,
+    pub(crate) label: String,
+}
+
 /// Holds how the user opens a container. A passphrase is typed here, and a
 /// key file is one this live system can read. Either one is secret, so it is
 /// never drawn, logged or written into a recipe.
@@ -85,11 +94,17 @@ pub(crate) const OPEN: &str = "open";
 pub(crate) struct Created {
     /// Holds the size the user typed, in whole GB.
     pub(crate) gb: u64,
+    /// Holds how far into the free region the user placed the partition, in
+    /// whole GB. Zero starts the partition at the region's first sector.
+    pub(crate) offset: u64,
     /// Names where it mounts. It stays empty until the user assigns it.
     pub(crate) target: String,
     /// Names what it is formatted as. It stays empty until the user chooses
     /// a format.
     pub(crate) fstype: String,
+    /// Names the label the cut writes into the partition table. It stays
+    /// empty until the user renames the partition.
+    pub(crate) label: String,
     /// Names the node the partition actually got. `cut_partitions` writes it
     /// once `sfdisk` has appended the partition, from the node the disk gives
     /// it then. It stays empty until then, because only the cut knows the
@@ -109,13 +124,19 @@ pub(crate) struct CustomLayout {
     /// partition table at all.
     pub(crate) deletes: Vec<String>,
     pub(crate) creates: Vec<Created>,
+    /// Holds the labels the plan writes onto partitions it keeps. `run`
+    /// enacts each through `sfdisk --part-label` before fisherman runs.
+    pub(crate) renames: Vec<Rename>,
+    /// Holds the ESP entries the plan replaces. `run` removes them before
+    /// fisherman writes the entries the image carries.
+    pub(crate) esp: Vec<EspRemoval>,
     /// Holds the disk the user reviewed immediately before the destructive
     /// summary. `cut_partitions` refuses a replaced or changed table rather
     /// than applying the approved partition numbers to the disk now present.
     pub(crate) confirmed: Option<DiskState>,
 }
 
-#[derive(Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Partition {
     pub(crate) device: String,
     pub(crate) size: String,
@@ -175,6 +196,41 @@ impl CustomLayout {
     /// sites ask it, so the test lives here once.
     pub(crate) fn opens_the_root(&self) -> bool {
         self.opens.iter().any(|open| open.target == "/")
+    }
+
+    /// Gives the label the plan writes onto one partition it keeps, which
+    /// stands in for the label the partition carries now.
+    pub(crate) fn renamed(&self, partition: &str) -> Option<&str> {
+        self.renames
+            .iter()
+            .find(|rename| rename.partition == partition)
+            .map(|rename| rename.label.as_str())
+    }
+
+    /// Reports whether the plan rewrites one partition's filesystem. An
+    /// assigned partition keeps its filesystem, because only a format answer
+    /// erases it.
+    pub(crate) fn formatted(&self, partition: &str) -> bool {
+        self.mounts
+            .iter()
+            .any(|mount| mount.partition == partition && mount.fstype != "unformatted")
+    }
+
+    /// Reports whether the plan takes the partition one link names, so the
+    /// entry that named it is replaced. A mount point, a format and an opened
+    /// container each take the partition. A delete removes it.
+    pub(crate) fn entry_replaced(&self, link: &str) -> bool {
+        !link.is_empty()
+            && (self.deletes.iter().any(|at| at == link)
+                || self.mounts.iter().any(|mount| mount.partition == link)
+                || self.opens.iter().any(|open| open.partition == link))
+    }
+
+    /// Reports whether the system one link names is deleted or rewritten,
+    /// which leaves its ESP entry booting nothing. The plan removes those
+    /// entries and the image writes its own.
+    pub(crate) fn entry_gone(&self, link: &str) -> bool {
+        !link.is_empty() && (self.deletes.iter().any(|at| at == link) || self.formatted(link))
     }
 }
 

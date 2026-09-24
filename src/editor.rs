@@ -1,7 +1,7 @@
 use super::*;
 
 /// Names one row of the layout table. A row is a whole disk, one partition of
-/// that disk, or a grey row of the automatic plan.
+/// that disk, one the plan cuts, or a row the cursor cannot rest on.
 #[derive(Clone)]
 pub(crate) enum RowKind {
     Disk(String),
@@ -13,6 +13,8 @@ pub(crate) enum RowKind {
     Created {
         index: usize,
     },
+    /// A row the user reads and cannot answer: the automatic plan's rows and
+    /// the systems a partition carries.
     Preview,
 }
 
@@ -24,12 +26,14 @@ pub(crate) enum PartAction {
     Reset,
     Open,
     Close,
-    /// Changes the partition table itself. `Delete` and `Clear` plan a
-    /// removal and `Create` plans a cut. `run` enacts all three through
-    /// `sfdisk` before fisherman is handed the recipe.
+    /// Changes the partition table itself. `run` enacts every one of these
+    /// through `sfdisk` before fisherman is handed the recipe: `Delete` and
+    /// `Clear` plan a removal, `Create` plans a cut whose name rides in the
+    /// script, and `Rename` writes an existing partition's label.
     Delete,
     Clear,
     Create,
+    Rename,
 }
 
 /// Gives the filesystem one partition's answer leaves on the disk. A Format
@@ -55,11 +59,17 @@ pub(crate) fn fits(target: &str, fstype: &str) -> bool {
 }
 
 /// Lists the mount points one partition can take. A partition is never
-/// offered a mount point its filesystem cannot carry.
-pub(crate) fn assigns(partition: &Partition, answer: Option<&Mounted>) -> Vec<&'static str> {
+/// offered a mount point its filesystem cannot carry. `boot` allows a separate
+/// `/boot`, which is an answer only where the target's bootloader can read one.
+pub(crate) fn assigns(
+    partition: &Partition,
+    answer: Option<&Mounted>,
+    boot: bool,
+) -> Vec<&'static str> {
     let holds = effective_fs(partition, answer);
     copy::mount_points()
         .into_iter()
+        .filter(|target| *target != "/boot" || boot)
         .filter(|target| fits(target, &holds))
         .collect()
 }
@@ -78,6 +88,30 @@ fn assign_children(points: &[&'static str]) -> Vec<&'static str> {
     let mut children = points.to_vec();
     children.push(copy::UNASSIGN);
     children
+}
+
+/// Names the label a mount point derives, in the words the automatic plan
+/// already writes onto the partitions it cuts. A mount point this installer
+/// does not name returns empty, and the rename window then opens blank.
+pub(crate) fn mount_name(target: &str) -> &'static str {
+    match target {
+        "/boot/efi" => "EFI-SYSTEM",
+        "/boot" => "boot",
+        "/" => "root",
+        "/var" | "/var/home" => "var",
+        _ => "",
+    }
+}
+
+/// Gives the name the rename window opens on. A label the plan already
+/// carries wins, so a second visit keeps the user's own answer. Otherwise a
+/// planned partition is named from its mount point and a partition that
+/// exists from its own label.
+pub(crate) fn rename_default(target: &str, label: &str) -> String {
+    match label.is_empty() {
+        true => mount_name(target).to_string(),
+        false => label.to_string(),
+    }
 }
 
 /// Takes one partition's mount point away and leaves its format alone. The
@@ -240,41 +274,48 @@ impl TableData {
     }
 
     /// Wraps the table as the form field the user moves the cursor over.
-    /// `chosen` drives the status glyph beside the `disk selection` label.
-    pub(crate) fn field(&self, cursor: usize, chosen: bool) -> common::ui::Field {
+    /// `chosen` drives the status glyph beside the `disk selection` label, and
+    /// `focused` opens the table with its own cursor for a caller that just
+    /// answered a table row.
+    pub(crate) fn field(&self, cursor: usize, chosen: bool, focused: bool) -> common::ui::Field {
         common::ui::Field::table(
             copy::DISK_SELECTION,
             copy::ROW_DISK,
             &copy::layout_headings(),
+            &copy::layout_widths(),
             self.rows.clone(),
             self.selectable.clone(),
             self.menus.clone(),
             cursor,
+            focused,
             chosen,
         )
     }
 }
 
 pub(crate) fn layout_table(
-    disks: &[(String, String)],
+    scan: &Scan,
     disk: &str,
     layout: Option<&CustomLayout>,
-    partitions: &[(String, Vec<Partition>)],
     payload: &Payload,
     var_size: &str,
     home: bool,
     encrypted: bool,
 ) -> TableData {
     let mut table = TableData::default();
-    for (device, detail) in disks {
-        let chosen = device == disk;
+    // A systemd-boot target reads its kernel from the ESP. A separate `/boot`
+    // would land where the firmware never looks, so the Assign list leaves it
+    // out. The automatic plan already cuts no `/boot` row for that target.
+    let boot = payload.bootloader != "systemd";
+    for entry in &scan.disks {
+        let chosen = entry.device == disk;
         // `disks` joins the size, the model and the removable tag with two
         // spaces. The size splits off here and the removable tag is stripped
         // off the model. `strip_suffix` yields a model only where the tag is
         // there, so a disk with no removable tag is named by its node alone.
-        let (size, rest) = match detail.split_once("  ") {
+        let (size, rest) = match entry.detail.split_once("  ") {
             Some((size, rest)) => (size.to_string(), rest),
-            None => (detail.clone(), ""),
+            None => (entry.detail.clone(), ""),
         };
         let model = rest
             .strip_suffix(copy::REMOVABLE)
@@ -285,8 +326,8 @@ pub(crate) fn layout_table(
         // The model column has no heading, and `clipped` ends a long model
         // with `...` where the column runs out.
         let name = match model {
-            Some(model) => format!("{model} ({device})"),
-            None => device.clone(),
+            Some(model) => format!("{model} ({})", entry.device),
+            None => entry.device.clone(),
         };
         // The disk rows are one choice among disks, so each carries a radio
         // glyph. The chosen disk is filled in and drawn white.
@@ -306,20 +347,21 @@ pub(crate) fn layout_table(
         if chosen {
             row[0] = common::ui::Cell::set(&choice);
         }
-        let here = partitions
-            .iter()
-            .find(|(at, _)| at == device)
-            .map(|(_, parts)| parts.len())
-            .unwrap_or(0);
         let (menus, actions) = match (layout.is_some(), chosen) {
-            (true, true) => disk_menu(here),
+            (true, true) => disk_menu(entry.partitions.len()),
             _ => (Vec::new(), Vec::new()),
         };
-        table.push(row, true, menus, actions, RowKind::Disk(device.clone()));
+        table.push(
+            row,
+            true,
+            menus,
+            actions,
+            RowKind::Disk(entry.device.clone()),
+        );
         match layout {
-            // An automatic layout draws the plan fisherman would cut. The
-            // rows are grey and unselectable, because the user answers nothing
-            // on them.
+            // An automatic layout replaces the chosen disk's partitions with
+            // the plan fisherman would cut. The rows are grey and
+            // unselectable, because the user answers nothing on them.
             None if chosen => {
                 // `automatic_rows` already wrote the tree glyphs into each
                 // name, so no glyph is added here.
@@ -331,8 +373,11 @@ pub(crate) fn layout_table(
                             common::ui::Cell::new(&name),
                             common::ui::Cell::new(&size),
                             common::ui::Cell::new(&filesystem),
-                            common::ui::Cell::new(&kind),
+                            // A plan row is not a format answer, so the format
+                            // column stays empty. The kind names the type the
+                            // cut will write.
                             common::ui::Cell::new(""),
+                            common::ui::Cell::new(&kind),
                             common::ui::Cell::new(&mount),
                         ],
                         false,
@@ -345,43 +390,15 @@ pub(crate) fn layout_table(
             // A manual layout draws what is on every disk. Only the chosen
             // disk's partitions carry popups and answers.
             Some(held) => {
-                let parts = partitions
-                    .iter()
-                    .find(|(at, _)| at == device)
-                    .map(|(_, parts)| parts.as_slice())
-                    .unwrap_or(&[]);
-                // A planned partition is drawn under the existing ones, so it
-                // owns the corner glyph. `usize::MAX` holds every existing
-                // partition on the tee glyph while any create is planned.
-                let last = match chosen && !held.creates.is_empty() {
-                    true => usize::MAX,
-                    false => parts.len().saturating_sub(1),
-                };
-                for (at, partition) in parts.iter().enumerate() {
-                    let branch = match at == last {
-                        true => "\u{2514}\u{2500} ",
-                        false => "\u{251c}\u{2500} ",
-                    };
-                    let answer = match chosen {
-                        true => held.answer(partition),
-                        false => None,
-                    };
-                    let deleted = chosen && held.deletes.contains(&partition.device);
-                    let cells = partition_cells(partition, answer, branch, deleted);
-                    let (menus, actions) = match chosen {
-                        true => partition_menu(partition, Some(held)),
-                        false => (Vec::new(), Vec::new()),
-                    };
-                    table.push(cells, chosen, menus, actions, RowKind::Part { index: at });
-                }
+                partition_rows(&mut table, entry, chosen.then_some(held), boot, payload);
                 // The planned cuts are drawn under the partitions already
                 // there, each on the node `created_devices` predicts. Only the
                 // chosen disk holds creates, because a create is planned onto
                 // the disk the user had chosen when they asked for it.
                 if chosen {
                     let devices = created_devices(
-                        device,
-                        &drawn_slots(parts, &held.deletes),
+                        &entry.device,
+                        &drawn_slots(&entry.partitions, &held.deletes),
                         held.creates.len(),
                     );
                     let last = held.creates.len().saturating_sub(1);
@@ -391,7 +408,7 @@ pub(crate) fn layout_table(
                             false => "\u{251c}\u{2500} ",
                         };
                         let device = devices.get(at).cloned().unwrap_or_default();
-                        let (menus, actions) = created_menu(create);
+                        let (menus, actions) = created_menu(create, boot);
                         table.push(
                             created_cells(create, &device, branch),
                             true,
@@ -402,10 +419,120 @@ pub(crate) fn layout_table(
                     }
                 }
             }
-            None => {}
+            // An automatic layout draws every other disk as it stands today,
+            // so the user answers which disk to take before taking it.
+            None => partition_rows(&mut table, entry, None, boot, payload),
         }
     }
     table
+}
+
+/// Draws one disk's existing partitions. `held` carries the layout's answers
+/// where this is the chosen disk; without it every row is grey and opens no
+/// popup. The systems a partition carries draw under it as child rows.
+fn partition_rows(
+    table: &mut TableData,
+    disk: &DiskScan,
+    held: Option<&CustomLayout>,
+    boot: bool,
+    payload: &Payload,
+) {
+    let parts = &disk.partitions;
+    let chosen = held.is_some();
+    // A planned partition is drawn under the existing ones, so it owns the
+    // corner glyph. `usize::MAX` holds every existing partition on the tee
+    // glyph while any create is planned.
+    let last = match chosen && !held.is_some_and(|held| held.creates.is_empty()) {
+        true => usize::MAX,
+        false => parts.len().saturating_sub(1),
+    };
+    for (at, partition) in parts.iter().enumerate() {
+        let branch = match at == last {
+            true => "\u{2514}\u{2500} ",
+            false => "\u{251c}\u{2500} ",
+        };
+        let answer = held.and_then(|held| held.answer(partition));
+        // A partition the plan formats vfat takes the ESP role. The
+        // filesystem the answer leaves is the one this test reads.
+        let carries = effective_fs(partition, answer.as_ref());
+        let deleted = held.is_some_and(|held| held.deletes.contains(&partition.device));
+        let renamed = held.and_then(|held| held.renamed(&partition.device));
+        let cells = partition_cells(partition, answer, branch, deleted, renamed);
+        let (menus, actions) = match held {
+            Some(held) => partition_menu(partition, Some(held), boot),
+            None => (Vec::new(), Vec::new()),
+        };
+        table.push(cells, chosen, menus, actions, RowKind::Part { index: at });
+        // A system the partition carries is a child of its row, the way a
+        // container's partitions are children of the container's own row.
+        // The plan's ESP carries the entries this image writes, and an entry
+        // whose system the plan takes gives way to them.
+        let labels: Vec<&Label> = disk
+            .labels
+            .iter()
+            .filter(|(device, _)| device == &partition.device)
+            .flat_map(|(_, labels)| labels)
+            .collect();
+        let shown: Vec<(String, bool)> = match held.filter(|held| {
+            is_fat(&carries)
+                && held
+                    .answer(partition)
+                    .is_some_and(|mounted| mounted.target == "/boot/efi")
+        }) {
+            Some(held) => {
+                let entries = payload.esp_entries();
+                // A format erases the entries the walk found, so the plan
+                // draws only what the image writes.
+                let mut rows: Vec<(String, bool)> = match held.formatted(&partition.device) {
+                    true => Vec::new(),
+                    false => labels
+                        .iter()
+                        .filter(|label| !held.entry_replaced(&label.link))
+                        .filter(|label| {
+                            !entries
+                                .iter()
+                                .any(|entry| entry.eq_ignore_ascii_case(&label.name))
+                        })
+                        .map(|label| (label.name.clone(), false))
+                        .collect(),
+                };
+                rows.extend(entries.iter().map(|entry| (entry.clone(), true)));
+                rows.sort_by(|one, other| one.0.cmp(&other.0));
+                rows
+            }
+            None => labels
+                .iter()
+                .map(|label| (label.name.clone(), false))
+                .collect(),
+        };
+        for (at, (label, written)) in shown.iter().enumerate() {
+            let branch = match at + 1 == shown.len() {
+                true => "   \u{2514}\u{2500} ",
+                false => "   \u{251c}\u{2500} ",
+            };
+            let said = format!("{branch}{label}");
+            let name = match written {
+                // The image writes this entry during the install, so the row
+                // is an answer rather than a system the disk carries now.
+                true => common::ui::Cell::set(&said),
+                false => common::ui::Cell::new(&said),
+            };
+            table.push(
+                vec![
+                    name,
+                    common::ui::Cell::new(""),
+                    common::ui::Cell::new(""),
+                    common::ui::Cell::new(""),
+                    common::ui::Cell::new(""),
+                    common::ui::Cell::new(""),
+                ],
+                false,
+                Vec::new(),
+                Vec::new(),
+                RowKind::Preview,
+            );
+        }
+    }
 }
 
 /// Reads the leading number of a size string as whole GB. `"68.7 GB"` gives
@@ -463,20 +590,23 @@ pub(crate) fn automatic_rows(
     };
     // The sixth field marks a row inside the LUKS container. The glyph pass
     // below reads it and drops it, so the calling command never sees it.
+    // The rows carry the names and types the cut will write, so the plan and
+    // the disk read the same afterwards. `efi`, `linux` and `luks` head the
+    // type column.
     let mut rows: Vec<(String, String, String, String, String, bool)> = vec![(
-        "esp".to_string(),
+        "EFI-SYSTEM".to_string(),
         copy::size_said("2"),
         "fat32".to_string(),
-        String::new(),
+        "efi".to_string(),
         "/boot/efi".to_string(),
         false,
     )];
     if boot {
         rows.push((
-            "/boot".to_string(),
+            "boot".to_string(),
             copy::size_said("2"),
             "ext4".to_string(),
-            String::new(),
+            "linux".to_string(),
             "/boot".to_string(),
             false,
         ));
@@ -486,27 +616,27 @@ pub(crate) fn automatic_rows(
             "root".to_string(),
             said(root_size),
             filesystem.clone(),
-            String::new(),
+            "linux".to_string(),
             "/".to_string(),
             inside,
         )
     };
     let home = |inside| {
         (
-            "home".to_string(),
+            "var".to_string(),
             match home_size {
                 Some(size) => copy::size_said(&size.to_string()),
                 None => copy::size_said(var_size),
             },
             filesystem.clone(),
-            String::new(),
+            "linux".to_string(),
             "/var/home".to_string(),
             inside,
         )
     };
     if encrypted {
         rows.push((
-            "luks".to_string(),
+            "root (LUKS)".to_string(),
             said(left),
             String::new(),
             "luks".to_string(),
@@ -543,12 +673,14 @@ pub(crate) fn automatic_rows(
 }
 
 /// Draws one existing partition as a table row. Every cell the layout answers
-/// is drawn white.
+/// is drawn white. `renamed` holds the label the plan writes, which stands in
+/// for the label the partition carries now.
 fn partition_cells(
     partition: &Partition,
     answer: Option<Mounted>,
     branch: &str,
     deleted: bool,
+    renamed: Option<&str>,
 ) -> Vec<common::ui::Cell> {
     // A partition the plan removes says `remove` in the format column and
     // nothing else. Its filesystem, type and mount stop being true the moment
@@ -594,13 +726,17 @@ fn partition_cells(
         None => common::ui::Cell::new(""),
     };
     // A labelled partition is named by its label and an unlabelled one by
-    // its node. The name cell turns white once the partition carries an
-    // answer, so one glance down the first column finds the answered rows.
-    let said = match partition.label.is_empty() {
+    // its node. A rename the plan carries stands in for the label the
+    // partition holds now. The name cell turns white once the partition
+    // carries an answer, so one glance down the first column finds the
+    // answered rows.
+    let label = renamed.unwrap_or(&partition.label);
+    let said = match label.is_empty() {
         true => partition.device.clone(),
-        false => format!("{} ({})", partition.label, partition.device),
+        false => format!("{} ({})", label, partition.device),
     };
-    let device = match answer.is_some() {
+    let answered = answer.is_some() || renamed.is_some();
+    let device = match answered {
         true => common::ui::Cell::set(&format!("{branch}{said}")),
         false => common::ui::Cell::new(&format!("{branch}{said}")),
     };
@@ -615,10 +751,12 @@ fn partition_cells(
 }
 
 /// Builds one existing partition's popup and the action each item answers
-/// with. Building the popup writes nothing to the disk.
+/// with. Building the popup writes nothing to the disk. `boot` allows the
+/// `/boot` mount point, as `assigns` does.
 pub(crate) fn partition_menu(
     partition: &Partition,
     held: Option<&CustomLayout>,
+    boot: bool,
 ) -> (Vec<common::ui::MenuItem>, Vec<PartAction>) {
     // A partition the plan will remove offers `Reset` alone. Nothing can be
     // mounted, formatted or opened on a partition that will not be there, and
@@ -630,6 +768,7 @@ pub(crate) fn partition_menu(
         );
     }
     let answer = held.and_then(|layout| layout.answer(partition));
+    let renamed = held.is_some_and(|layout| layout.renamed(&partition.device).is_some());
     let opened = held.is_some_and(|layout| {
         layout
             .opens
@@ -665,7 +804,7 @@ pub(crate) fn partition_menu(
             }
         }
     } else {
-        let points = assigns(partition, answer.as_ref());
+        let points = assigns(partition, answer.as_ref(), boot);
         if !points.is_empty() {
             let points = assign_children(&points);
             items.push(common::ui::MenuItem::under(copy::ASSIGN, &points));
@@ -674,12 +813,15 @@ pub(crate) fn partition_menu(
         items.push(common::ui::MenuItem::new(copy::FORMAT_ROW));
         actions.push(PartAction::Format);
     }
-    if answer.is_some() {
+    // The name is not an erase, so `Rename` sits above the `Reset` that undoes
+    // all the answers and well above `Delete`. The cursor opens on the first
+    // item, which must never be the destructive answer.
+    items.push(common::ui::MenuItem::new(copy::RENAME_PART));
+    actions.push(PartAction::Rename);
+    if answer.is_some() || renamed {
         items.push(common::ui::MenuItem::new(copy::RESET_CHANGES));
         actions.push(PartAction::Reset);
     }
-    // `Delete` goes last, below the `Reset` that undoes it. The cursor opens
-    // on the first item, which must never be the destructive answer.
     items.push(common::ui::MenuItem::new(copy::DELETE_PART));
     actions.push(PartAction::Delete);
     (items, actions)
@@ -687,14 +829,15 @@ pub(crate) fn partition_menu(
 
 /// Builds one planned partition's popup. A partition cut blank has nothing to
 /// keep and no container to open, so the popup formats it, assigns it or
-/// drops it.
-fn created_menu(create: &Created) -> (Vec<common::ui::MenuItem>, Vec<PartAction>) {
+/// drops it. `boot` allows the `/boot` mount point, as `assigns` does.
+fn created_menu(create: &Created, boot: bool) -> (Vec<common::ui::MenuItem>, Vec<PartAction>) {
     let points: Vec<&'static str> = copy::mount_points()
         .into_iter()
         // `collect` formats a create from `plain_formats`, which carries no
         // `swap`. A `/swap` point could never be completed, so the popup
         // leaves it out.
         .filter(|target| *target != "/swap")
+        .filter(|target| *target != "/boot" || boot)
         .filter(|target| create.fstype.is_empty() || fits(target, &create.fstype))
         .collect();
     let mut items = Vec::new();
@@ -706,6 +849,8 @@ fn created_menu(create: &Created) -> (Vec<common::ui::MenuItem>, Vec<PartAction>
     }
     items.push(common::ui::MenuItem::new(copy::FORMAT_ROW));
     actions.push(PartAction::Format);
+    items.push(common::ui::MenuItem::new(copy::RENAME_PART));
+    actions.push(PartAction::Rename);
     items.push(common::ui::MenuItem::new(copy::DELETE_PART));
     actions.push(PartAction::Delete);
     (items, actions)
@@ -729,7 +874,8 @@ pub(crate) fn disk_menu(parts: usize) -> (Vec<common::ui::MenuItem>, Vec<PartAct
 /// Draws one planned partition as a table row. The node is the one
 /// `created_devices` predicts from the slots that survive the plan's deletes.
 /// The format column reads `new`, because a partition that does not exist yet
-/// says more than a format tick could.
+/// says more than a format tick could. A label the plan carries is drawn
+/// ahead of the node, as it is on a partition that already exists.
 fn created_cells(create: &Created, device: &str, branch: &str) -> Vec<common::ui::Cell> {
     let filesystem = match create.fstype.is_empty() {
         true => common::ui::Cell::new(""),
@@ -743,8 +889,12 @@ fn created_cells(create: &Created, device: &str, branch: &str) -> Vec<common::ui
         true => common::ui::Cell::new(""),
         false => common::ui::Cell::set(&create.target),
     };
+    let said = match create.label.is_empty() {
+        true => device.to_string(),
+        false => format!("{} ({device})", create.label),
+    };
     vec![
-        common::ui::Cell::set(&format!("{branch}{device}")),
+        common::ui::Cell::set(&format!("{branch}{said}")),
         common::ui::Cell::new(&copy::size_said(&create.gb.to_string())),
         filesystem,
         common::ui::Cell::set(copy::CELL_NEW),
@@ -789,10 +939,6 @@ pub(crate) fn usable_key(key: &Key, encrypted_root: bool) -> bool {
 }
 
 pub(crate) const LINUX_FILESYSTEMS: [&str; 4] = ["ext3", "ext4", "xfs", "btrfs"];
-
-fn is_fat(fstype: &str) -> bool {
-    ["vfat", "fat", "fat32"].contains(&fstype)
-}
 
 /// Finds the key one container is opened with. A key a system on the disk
 /// already records is reused where the installed machine could use it.
@@ -855,29 +1001,24 @@ fn ask_key(plain_root: bool) -> Result<Key, String> {
 }
 
 /// Shows a disk one last time before a whole-disk install takes it. The
-/// screen names the model and the node and lists the partitions on the disk
-/// today. `true` is the answer that confirms the disk.
-pub(crate) fn confirm_disk(device: &str, disks: &[(String, String)]) -> Result<bool, String> {
-    let said = disks
-        .iter()
-        .find(|(at, _)| at == device)
-        .map(|(_, said)| said.clone())
-        .unwrap_or_default();
-    let (size, model) = match said.split_once("  ") {
+/// screen names the model and the node and lists the partitions the scan
+/// found on the disk. `true` is the answer that confirms the disk.
+pub(crate) fn confirm_disk(disk: &DiskScan) -> Result<bool, String> {
+    let (size, model) = match disk.detail.split_once("  ") {
         Some((size, rest)) => (
             size.to_string(),
             rest.split("  ").next().unwrap_or("").to_string(),
         ),
-        None => (said.clone(), String::new()),
+        None => (disk.detail.clone(), String::new()),
     };
     let heading = match model.is_empty() {
-        true => format!("{device}  {size}"),
-        false => format!("{model} ({device})  {size}"),
+        true => format!("{}  {size}", disk.device),
+        false => format!("{model} ({})  {size}", disk.device),
     };
-    let parts = partitions(device).unwrap_or_default();
-    let rows: Vec<(String, String)> = match parts.is_empty() {
+    let rows: Vec<(String, String)> = match disk.partitions.is_empty() {
         true => vec![("no partitions".to_string(), String::new())],
-        false => parts
+        false => disk
+            .partitions
             .iter()
             .map(|part| {
                 let name = match part.label.is_empty() {
@@ -1035,44 +1176,100 @@ pub(crate) fn edit_luks(
     }
 }
 
-/// Asks the user how big a partition to cut. `room` is the GB a create can
-/// have, which is the span after the last surviving partition less what the
-/// plan already spends. An oversized number is refused here, because `sfdisk`
-/// accepts one and shrinks the partition silently once the deletes are
-/// written.
-pub(crate) fn ask_size(room: u64) -> Result<Option<u64>, String> {
-    let mut typed = String::new();
+/// Names each partition on one disk for the neighbour boxes of the create
+/// window's bar, by the label the layout table draws. An unlabelled partition
+/// takes its short node without the `/dev/` path, because a box holds at most
+/// a quarter of the bar. A partition the plan deletes is left out, because a
+/// create takes its slot number.
+pub(crate) fn slot_names(disk: &DiskScan, held: Option<&CustomLayout>) -> Vec<(usize, String)> {
+    let short = |device: &str, label: &str| match label.is_empty() {
+        true => device.rsplit('/').next().unwrap_or(device).to_string(),
+        false => label.to_string(),
+    };
+    let mut names: Vec<(usize, String)> = disk
+        .partitions
+        .iter()
+        .filter(|partition| !held.is_some_and(|held| held.deletes.contains(&partition.device)))
+        .filter_map(|partition| {
+            let label = held
+                .and_then(|held| held.renamed(&partition.device))
+                .unwrap_or(&partition.label);
+            let number = partition_number(&partition.device).ok()?;
+            Some((number, short(&partition.device, label)))
+        })
+        .collect();
+    if let Some(held) = held {
+        let devices = created_devices(
+            &disk.device,
+            &drawn_slots(&disk.partitions, &held.deletes),
+            held.creates.len(),
+        );
+        for (device, create) in devices.iter().zip(&held.creates) {
+            if let Ok(number) = partition_number(device) {
+                names.push((number, short(device, &create.label)));
+            }
+        }
+    }
+    names
+}
+
+/// Asks where a planned partition goes: how far into the free space it starts
+/// and how big it is. `rooms` holds what the plan leaves. The size opens on
+/// the first free region's whole GB, which is the hole a delete left, and the
+/// offset opens at zero. A size and offset that fit nowhere are refused here,
+/// because `sfdisk` accepts an oversized request and shrinks the partition
+/// silently once the deletes are written.
+pub(crate) fn ask_create(
+    rooms: Rooms,
+    holes: Vec<common::ui::Hole>,
+) -> Result<Option<(u64, u64)>, String> {
+    let header = [common::ui::HeaderLine::Placement {
+        holes,
+        offset: 0,
+        size: 1,
+        available: copy::ROW_AVAILABLE.to_string(),
+    }];
+    let mut offset = "0".to_string();
+    let mut size = match rooms.first {
+        0 => String::new(),
+        gb => gb.to_string(),
+    };
     let mut refusal = String::new();
     loop {
-        // The refusal rides on the next window's label, and the refused value
-        // stays in the field so the user corrects it rather than retyping it.
+        // The refusal rides on the next window's label, and the refused values
+        // stay in the fields so the user corrects them rather than retyping.
         // A measure field answers with `Changed` on enter before the form's
-        // own blocked branch can draw, so `size_short_of` is asked again here
-        // and the window opens a second time with its reason.
+        // own blocked branch can draw, so `create_short_of` is asked again
+        // here and the window opens a second time with its reason.
         let label = match refusal.is_empty() {
-            true => copy::NEW_SIZE.to_string(),
+            true => copy::ROW_PARTITION_SIZE.to_string(),
             false => refusal.clone(),
         };
-        let mut fields = vec![common::ui::Field::measure(&label, &typed, "GB")];
+        let mut fields = vec![
+            common::ui::Field::measure(copy::ROW_OFFSET, &offset, "GB"),
+            common::ui::Field::measure(&label, &size, "GB"),
+        ];
         let mut left: Vec<usize> = Vec::new();
         let filled = common::ui::in_titled_overlay(
             common::ui::WINDOW_WIDTH,
-            // 8 rows hold the label and the measure row. A refusal takes the
-            // label column rather than a row of its own, because a measure
-            // field's enter leaves the window before the form can draw one.
-            8,
+            // 13 rows hold the placement bar, the available line, a blank
+            // after each, the two measure rows, and the room the refusal takes
+            // on the size row's label.
+            13,
             copy::NEW_PARTITION,
             || {
                 common::ui::form(
                     &mut fields,
                     &[],
-                    |fields| size_short_of(&fields[0].value(), room),
+                    |fields| create_short_of(&fields[0].value(), &fields[1].value(), rooms.largest),
                     |_| Vec::new(),
-                    |_| vec![0],
+                    |_| vec![0, 1],
                     copy::SUBMIT_KEYS,
+                    &header,
                     &[],
-                    &[],
-                    0,
+                    // The owner asked for the cursor to open on the size,
+                    // because the offset is the rarer answer.
+                    1,
                     &mut left,
                 )
             },
@@ -1080,12 +1277,18 @@ pub(crate) fn ask_size(room: u64) -> Result<Option<u64>, String> {
         if !submitted(filled) {
             return Ok(None);
         }
-        typed = fields[0].value();
-        match size_short_of(&typed, room) {
-            None => return Ok(size_gb(&typed)),
-            // An empty field's own refusal is empty, because the main form
-            // states it through the blocked button. This window has none, so
-            // the empty answer gets a reason of its own.
+        offset = fields[0].value();
+        size = fields[1].value();
+        match create_short_of(&offset, &size, rooms.largest) {
+            None => {
+                return Ok(Some((
+                    size_gb(&offset).unwrap_or(0),
+                    size_gb(&size).unwrap_or(0),
+                )))
+            }
+            // An empty size field's own refusal is empty, because the blocked
+            // button states the screen is unfinished. This window has no
+            // action button, so the empty answer gets a reason of its own.
             Some(said) => {
                 refusal = match said.is_empty() {
                     true => copy::NEW_SIZE_NEEDED.to_string(),
@@ -1096,11 +1299,11 @@ pub(crate) fn ask_size(room: u64) -> Result<Option<u64>, String> {
     }
 }
 
-/// Whether the size window's key was its submit. A measure field answers with
-/// `Changed` on enter, because the main form redraws the row it sizes from
-/// that key. This window has no row to redraw and no action button to take
-/// instead, so the same key is its submit. Any other result, including the
-/// `Left` that `esc` twice returns, answers nothing.
+/// Whether the create window's key was its submit. A measure field answers
+/// with `Changed` on enter, because the main form redraws the row it sizes
+/// from that key. This window has no row to redraw and no action button to
+/// take instead, so the same key is its submit. Any other result, including
+/// the `Left` that `esc` twice returns, answers nothing.
 pub(crate) fn submitted(filled: common::ui::Filled) -> bool {
     matches!(
         filled,
@@ -1108,17 +1311,53 @@ pub(crate) fn submitted(filled: common::ui::Filled) -> bool {
     )
 }
 
-/// Says why a size cannot be taken. An empty box returns an empty refusal,
-/// because the blocked `Create` already says the screen is unfinished. A zero
-/// and a number above `room` both return `custom_too_big`, which states the
-/// GB the disk still has.
-pub(crate) fn size_short_of(typed: &str, room: u64) -> Option<String> {
-    let Some(size) = size_gb(typed) else {
+/// Says why a placed create cannot be taken. `room` is the largest free
+/// region's whole GB, so an offset and a size that fit no region are refused
+/// with the most the disk still has. An empty size returns an empty refusal,
+/// because the window's own legend says the screen is unfinished.
+pub(crate) fn create_short_of(offset: &str, size: &str, room: u64) -> Option<String> {
+    let Some(size) = size_gb(size) else {
         return Some(String::new());
     };
-    match size == 0 || size > room {
+    let offset = size_gb(offset).unwrap_or(0);
+    match size == 0 || offset.saturating_add(size) > room {
         true => Some(copy::custom_too_big(room)),
         false => None,
+    }
+}
+
+/// Asks for the name one partition takes. The field opens on the name the
+/// plan gives it already, which is the partition's own label or the name its
+/// mount point derives. Esc answers nothing, and `collect` then returns to the
+/// layout table.
+pub(crate) fn ask_rename(partition: &str, held: &str) -> Result<Option<String>, String> {
+    let mut fields = vec![common::ui::Field::text(copy::NEW_NAME, held)];
+    let actions = [copy::RENAME_PART, copy::GO_BACK];
+    let header: Vec<common::ui::HeaderLine> = match partition.is_empty() {
+        true => Vec::new(),
+        false => vec![common::ui::HeaderLine::Row(partition.to_string())],
+    };
+    let mut left: Vec<usize> = Vec::new();
+    let filled = common::ui::in_overlay(40, 8, || {
+        common::ui::form(
+            &mut fields,
+            &actions,
+            |fields| match fields[0].value().is_empty() {
+                true => Some(copy::NAME_NEEDED.to_string()),
+                false => None,
+            },
+            |_| Vec::new(),
+            |_| vec![0],
+            copy::INSTALL_KEYS,
+            &header,
+            &[],
+            0,
+            &mut left,
+        )
+    })?;
+    match filled {
+        common::ui::Filled::Took(0) => Ok(Some(fields[0].value())),
+        _ => Ok(None),
     }
 }
 
@@ -1231,17 +1470,17 @@ pub(crate) fn layout_short_of(
     {
         return Some(copy::custom_root_too_small(root.gb, reserve));
     }
-    // This weighs the whole plan against the room the disk has now.
-    // `ask_size` already refused a single oversized create as the user typed
-    // it. This catches the plan that grew too big afterwards, where a delete
-    // was taken back or where several creates each fit and together do not.
+    // This weighs the whole plan against the room the disk has now. The
+    // create window already refused a single oversized create as the user
+    // typed it. This catches the plan that grew too big afterwards, where a
+    // delete was taken back or where two creates each fit and together do not.
     if let Some(table) = table {
-        if let Some(why) = table.wrong_label_for(&layout.deletes, layout.creates.len()) {
+        if let Some(why) =
+            table.wrong_label_for(&layout.deletes, layout.creates.len(), layout.renames.len())
+        {
             return Some(why);
         }
-        let room = table.appendable_gb(&layout.deletes);
-        let asked: u64 = layout.creates.iter().map(|create| create.gb).sum();
-        if asked > room {
+        if let Err(room) = place_creates(table, &layout.deletes, &layout.creates) {
             return Some(copy::custom_too_big(room));
         }
     }

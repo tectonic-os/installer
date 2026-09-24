@@ -1,7 +1,11 @@
 use super::*;
 use std::io::Write as _;
 
-pub(crate) fn partitions(disk: &str) -> Result<Vec<Partition>, String> {
+/// Reads a disk's partitions, and whether the disk node itself carries a
+/// filesystem or anything under it. A whole-disk filesystem and a whole-disk
+/// LVM physical volume leave no `part` children, so the partition list alone
+/// cannot say what a disk holds.
+pub(crate) fn partitions(disk: &str) -> Result<(Vec<Partition>, bool), String> {
     let out = Command::new("lsblk")
         .args([
             "--json",
@@ -18,7 +22,20 @@ pub(crate) fn partitions(disk: &str) -> Result<Vec<Partition>, String> {
             String::from_utf8_lossy(&out.stderr).trim()
         ));
     }
-    partition_rows(&String::from_utf8_lossy(&out.stdout))
+    let raw = String::from_utf8_lossy(&out.stdout);
+    Ok((partition_rows(&raw)?, carries_content(&raw)?))
+}
+
+/// Whether the disk node itself carries a filesystem or has any child at all.
+pub(crate) fn carries_content(raw: &str) -> Result<bool, String> {
+    let doc = Json::parse(raw).map_err(|err| format!("lsblk wrote invalid JSON: {err}"))?;
+    let Some(disk) = json::items(&doc, "blockdevices").first() else {
+        return Ok(false);
+    };
+    Ok(
+        json::text(disk, "fstype").is_some_and(|fstype| !fstype.is_empty())
+            || !json::items(disk, "children").is_empty(),
+    )
 }
 
 pub(crate) fn partition_rows(raw: &str) -> Result<Vec<Partition>, String> {
@@ -204,6 +221,27 @@ fn mounts_root() -> PathBuf {
 #[derive(Default)]
 pub(crate) struct Mounts(Vec<PathBuf>);
 
+impl Mounts {
+    /// Unmounts one mount and forgets it, reporting a failure. The guard
+    /// unmounts whatever is left when it drops, and a caller that must know
+    /// the unmount succeeded calls this first.
+    pub(crate) fn release(&mut self, at: &Path) -> Result<(), String> {
+        let out = Command::new("umount")
+            .arg(at)
+            .output()
+            .map_err(|err| format!("umount {}: {err}", at.display()))?;
+        if !out.status.success() {
+            return Err(format!(
+                "unmounting {}: {}",
+                at.display(),
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        self.0.retain(|mounted| mounted != at);
+        Ok(())
+    }
+}
+
 impl Drop for Mounts {
     fn drop(&mut self) {
         for at in &self.0 {
@@ -237,6 +275,27 @@ fn mount_ro(device: &Path, fstype: &str, mounts: &mut Mounts) -> Result<PathBuf,
         return Err(format!(
             "mounting {} read-only: {}",
             device.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    mounts.0.push(at.clone());
+    Ok(at)
+}
+
+/// Mounts one partition read-write under the walk's mount root. The walk
+/// itself writes nothing, and this serves the one write its findings cause:
+/// removing an ESP entry whose system the plan replaces.
+pub(crate) fn mount_rw(device: &str, mounts: &mut Mounts) -> Result<PathBuf, String> {
+    let at = mounts_root().join(format!("write-{}", mounts.0.len() + 1));
+    std::fs::create_dir_all(&at).map_err(|err| format!("{}: {err}", at.display()))?;
+    let out = Command::new("mount")
+        .arg(device)
+        .arg(&at)
+        .output()
+        .map_err(|err| format!("mount: {err}, and it is what writes {device}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "mounting {device}: {}",
             String::from_utf8_lossy(&out.stderr).trim()
         ));
     }
@@ -283,48 +342,180 @@ fn mountables(disk: &str) -> Result<Vec<(String, String)>, String> {
     mountable_rows(&String::from_utf8_lossy(&out.stdout))
 }
 
-/// Mounts every filesystem the disk has and keeps the ones carrying
-/// `/etc/fstab`, which is what makes one an old system. A failed mount is
-/// reported rather than passed over. A disk the walk could not read must not
-/// look like a disk with nothing on it.
-fn old_systems(disk: &str, mounts: &mut Mounts) -> (Vec<OldSystem>, Vec<String>) {
-    let mut systems = Vec::new();
-    let mut unread = Vec::new();
-    match mountables(disk) {
-        Ok(devices) => {
-            for (device, fstype) in devices {
-                let at = match mount_ro(Path::new(&device), &fstype, mounts) {
-                    Ok(at) => at,
-                    Err(err) => {
-                        unread.push(err);
-                        continue;
-                    }
-                };
-                let fstab = at.join("etc/fstab");
-                if !fstab.is_file() {
-                    continue;
-                }
-                // Each file is opened only where it is a regular file. A
-                // hostile old system otherwise names a FIFO, and the walk
-                // blocks on it with nothing drawn.
-                let crypttab = at.join("etc/crypttab");
-                systems.push(OldSystem {
-                    crypttab: match crypttab.is_file() {
-                        true => std::fs::read_to_string(&crypttab).unwrap_or_default(),
-                        false => String::new(),
-                    },
-                    fstab: std::fs::read_to_string(&fstab).unwrap_or_default(),
-                    at,
-                });
-            }
+/// Holds what one disk's read-only walk found: the systems each mounted
+/// filesystem carries, the ones that register an `/etc/fstab` for the key
+/// search, and the mounts that failed.
+#[derive(Default)]
+struct Walked {
+    systems: Vec<OldSystem>,
+    unread: Vec<String>,
+    /// Names the systems each mounted filesystem carries, keyed by the
+    /// partition or mapper node it was mounted from.
+    labels: Vec<(String, Vec<Carried>)>,
+}
+
+/// Mounts every filesystem one disk carries and reads what each one holds.
+/// One walk serves both callers: the systems the picture names, and the keys
+/// an old system's crypttab points at.
+fn walk_disk(disk: &str, mounts: &mut Mounts) -> Walked {
+    let mut walked = Walked::default();
+    let devices = match mountables(disk) {
+        Ok(devices) => devices,
+        Err(err) => {
+            walked.unread.push(err);
+            return walked;
         }
-        Err(err) => unread.push(err),
+    };
+    for (device, fstype) in devices {
+        let at = match mount_ro(Path::new(&device), &fstype, mounts) {
+            Ok(at) => at,
+            Err(err) => {
+                walked.unread.push(err);
+                continue;
+            }
+        };
+        let labels = labels_at(&at, &fstype);
+        if !labels.is_empty() {
+            walked.labels.push((device.clone(), labels));
+        }
+        let fstab = at.join("etc/fstab");
+        if !fstab.is_file() {
+            continue;
+        }
+        // Each file is opened only where it is a regular file. A hostile old
+        // system otherwise names a FIFO, and the walk blocks on it with
+        // nothing drawn.
+        let crypttab = at.join("etc/crypttab");
+        walked.systems.push(OldSystem {
+            crypttab: match crypttab.is_file() {
+                true => std::fs::read_to_string(&crypttab).unwrap_or_default(),
+                false => String::new(),
+            },
+            fstab: std::fs::read_to_string(&fstab).unwrap_or_default(),
+            at,
+        });
     }
-    (systems, unread)
+    walked
+}
+
+/// Names the systems one mounted filesystem carries, for the child rows the
+/// table draws under its partition. A vfat filesystem is an ESP, and what it
+/// carries is the vendor directories under `EFI/`; anything else is read for
+/// the system it boots.
+pub(crate) fn labels_at(at: &Path, fstype: &str) -> Vec<Carried> {
+    match is_fat(fstype) {
+        true => esp::entries(at),
+        false => boot_labels(at),
+    }
+}
+
+/// Resolves one name under a mount, refusing a path that leaves it. A hostile
+/// old system otherwise names a symlink out, and the walk reads the live
+/// environment's own files as if the disk held them.
+pub(crate) fn inside(mount: &Path, name: &Path) -> Option<PathBuf> {
+    let root = std::fs::canonicalize(mount).ok()?;
+    let said = std::fs::canonicalize(mount.join(name.strip_prefix("/").unwrap_or(name))).ok()?;
+    said.starts_with(&root).then_some(said)
+}
+
+/// Resolves the regular file one name holds under a mount. A FIFO, a
+/// directory and a device are not files to read, and a FIFO blocks the walk
+/// with nothing drawn.
+pub(crate) fn inside_file(mount: &Path, name: &Path) -> Option<PathBuf> {
+    inside(mount, name).filter(|path| path.is_file())
+}
+
+/// Names the system one mounted filesystem boots. Its own `os-release` names
+/// it where it has one, and a loader entry's title names it otherwise. Only
+/// an ESP entry takes a link, because only an ESP entry is replaced or
+/// removed.
+fn boot_labels(at: &Path) -> Vec<Carried> {
+    os_release_name(at)
+        .or_else(|| loader_title(at))
+        .map(|name| Carried {
+            name,
+            links: Vec::new(),
+        })
+        .into_iter()
+        .collect()
+}
+
+/// Reads `PRETTY_NAME` out of a mounted system's own `os-release`.
+fn os_release_name(at: &Path) -> Option<String> {
+    let file = inside_file(at, Path::new("etc/os-release"))?;
+    let text = std::fs::read_to_string(&file).ok()?;
+    text.lines().find_map(|line| {
+        let value = line
+            .strip_prefix("PRETTY_NAME=")?
+            .trim()
+            .trim_matches(['"', '\'']);
+        (!value.is_empty()).then(|| value.to_string())
+    })
+}
+
+/// Reads the title of the first loader entry a mounted filesystem carries.
+/// The entries sit under `loader/` where this is the boot partition and under
+/// `boot/loader/` where it is the root.
+fn loader_title(at: &Path) -> Option<String> {
+    for file in loader_files(at) {
+        let Ok(text) = std::fs::read_to_string(&file) else {
+            continue;
+        };
+        let title = text
+            .lines()
+            .find_map(|line| line.strip_prefix("title "))
+            .map(str::trim)
+            .filter(|title| !title.is_empty());
+        if let Some(title) = title {
+            return Some(title.to_string());
+        }
+    }
+    None
+}
+
+/// The three GPT types a Windows install carries: the Microsoft reserved
+/// partition, the basic data volume and the recovery partition.
+const MSR: &str = "e3c9e316-0b5c-4db8-817d-f92df00215ae";
+const BASIC_DATA: &str = "ebd0a0a2-b9e5-4433-87c0-68b6b72699c7";
+const RECOVERY: &str = "de94bba4-06d1-4d40-a16a-bfd50179d6ac";
+
+/// A detected system's name is data read off the disk rather than screen
+/// copy, so it lives here and not in `copy`.
+const WINDOWS: &str = "Windows";
+
+/// Names the partition a Windows install is recognised by. Windows writes no
+/// `os-release` to read and its ESP may sit on another disk, so the GPT types
+/// are what name it. The reserved partition tells an install from a data disk
+/// that merely uses NTFS, and the basic data volume is the partition the user
+/// recognises.
+pub(crate) fn windows_label(partitions: &[Partition]) -> Option<(String, String)> {
+    let carried = |kind: &str| {
+        partitions
+            .iter()
+            .find(|part| part.parttype.eq_ignore_ascii_case(kind))
+    };
+    let reserved = carried(MSR)?;
+    // A reserved partition with neither its data volume nor its recovery
+    // partition beside it is not an install.
+    carried(BASIC_DATA).or_else(|| carried(RECOVERY))?;
+    let named = carried(BASIC_DATA).unwrap_or(reserved);
+    Some((named.device.clone(), WINDOWS.to_string()))
+}
+
+/// The Windows install a Microsoft entry links to. The install on the disk
+/// that carries the directory wins. If the machine has one install, a disk
+/// that carries none takes it. Two installs leave the directory unnamed,
+/// because nothing on an ESP tells them apart. A wrong link removes a boot
+/// entry for a system the plan keeps.
+pub(crate) fn windows_link(own: Option<&str>, installs: &[String]) -> Option<String> {
+    own.map(str::to_string).or_else(|| match installs {
+        [only] => Some(only.clone()),
+        _ => None,
+    })
 }
 
 /// Holds one key an old system carries and the mount point it used.
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct OldKey {
     /// Names the mount point the old fstab gives it. An old fstab that says
     /// nothing leaves it empty.
@@ -335,7 +526,7 @@ pub(crate) struct OldKey {
 
 /// Holds what the walk came back with. Each container carries either a
 /// proved key or the reason the walk has none for it.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct Discovered {
     pub(crate) found: Vec<(String, OldKey)>,
     pub(crate) why: Vec<(String, String)>,
@@ -545,21 +736,154 @@ pub(crate) fn discover(
     found
 }
 
-/// Runs the whole walk over one disk. A disk with no LUKS container is left
-/// alone, so nothing is mounted.
-pub(crate) fn old_keys(disk: &str, partitions: &[Partition]) -> Discovered {
-    if !partitions.iter().any(|part| part.fstype == "crypto_LUKS") {
-        return Discovered::default();
+/// One disk as the form's scan read it. Every screen renders this and no
+/// screen reads a disk again, so a redraw cannot show a different disk than
+/// the one the form opened on.
+pub(crate) struct DiskScan {
+    pub(crate) device: String,
+    /// The size, model and removable tag `disks` joined.
+    pub(crate) detail: String,
+    pub(crate) partitions: Vec<Partition>,
+    /// Whether the disk node itself carries a filesystem or has any child at
+    /// all, which the partition rows cannot show. A lone disk with content is
+    /// not one the form may take without an answer.
+    pub(crate) carries: bool,
+    /// The table read once at startup. A failed read keeps its reason, because
+    /// one unreadable disk must not take the form down; a screen that needs
+    /// the table reports it.
+    pub(crate) table: Result<DiskTable, String>,
+    /// The systems each partition carries, keyed by the partition's device,
+    /// with the partition each system boots where the walk placed it.
+    pub(crate) labels: Vec<(String, Vec<Label>)>,
+    /// The keys an old system on this disk holds for its containers.
+    pub(crate) keys: Discovered,
+}
+
+/// Every disk as the form's scan read it. `collect` builds it once, before
+/// the form draws; the screens render it and read no disk again.
+#[derive(Default)]
+pub(crate) struct Scan {
+    pub(crate) disks: Vec<DiskScan>,
+    /// Holds the disks whose partitions the scan could not read, with the
+    /// reason. The form draws no row for one, because a disk with no true
+    /// picture must not be offered as an install target.
+    pub(crate) unread: Vec<(String, String)>,
+}
+
+impl Scan {
+    /// Reads every disk once: its listing, its partitions, its table, and the
+    /// read-only walk that names what each partition carries and proves the
+    /// keys an old system holds. `table_changed` at confirm remains the guard
+    /// against a disk that moves under the plan.
+    pub(crate) fn read() -> Self {
+        let in_use = in_use_now();
+        let mut held = Mounts::default();
+        let mut listed = Vec::new();
+        let mut unread = Vec::new();
+        for (device, detail) in disks(&sys_block(), &in_use) {
+            let (partitions, carries) = match partitions(&device) {
+                Ok(parts) => parts,
+                Err(why) => {
+                    unread.push((device, why));
+                    continue;
+                }
+            };
+            let table = disk_table(&device);
+            let walked = walk_disk(&device, &mut held);
+            listed.push((device, detail, partitions, carries, table, walked));
+        }
+        // Every partition the scan read, so a loader on one disk can name a
+        // filesystem another disk carries.
+        let all: Vec<Partition> = listed
+            .iter()
+            .flat_map(|(_, _, partitions, ..)| partitions.clone())
+            .collect();
+        // The Windows installs across every disk, which a Microsoft entry
+        // names when its own disk carries none.
+        let installs: Vec<String> = listed
+            .iter()
+            .filter_map(|(_, _, partitions, ..)| windows_label(partitions))
+            .map(|(device, _)| device)
+            .collect();
+        let mut found = Vec::new();
+        for (device, detail, partitions, carries, table, walked) in listed {
+            let own = windows_label(&partitions);
+            let windows = windows_link(own.as_ref().map(|(device, _)| device.as_str()), &installs);
+            let mut labels = esp::linked(walked.labels, &all, windows.as_deref());
+            if let Some((at, name)) = own {
+                labels.push((
+                    at,
+                    vec![Label {
+                        name,
+                        link: windows.unwrap_or_default(),
+                    }],
+                ));
+            }
+            let keys = discover(
+                &partitions,
+                &walked.systems,
+                &walked.unread,
+                &mut held,
+                &|container, key| test_key(&container.device, key),
+            );
+            found.push(DiskScan {
+                device,
+                detail,
+                partitions,
+                carries,
+                table,
+                labels,
+                keys,
+            });
+        }
+        Self {
+            disks: found,
+            unread,
+        }
     }
-    let mut mounts = Mounts::default();
-    let (systems, unread) = old_systems(disk, &mut mounts);
-    discover(
-        partitions,
-        &systems,
-        &unread,
-        &mut mounts,
-        &|container, key| test_key(&container.device, key),
-    )
+
+    /// Finds one disk's scan by the node that names it.
+    pub(crate) fn get(&self, device: &str) -> Option<&DiskScan> {
+        self.disks.iter().find(|disk| disk.device == device)
+    }
+
+    /// The reason a run must stop instead of installing to a disk the scan
+    /// could not read. A disk the run names is refused by name, and a machine
+    /// with no readable disk left is refused by the first reason the scan
+    /// holds. A udev alias names a disk the scan read under its kernel name.
+    pub(crate) fn refusal(&self, device: &str) -> Option<String> {
+        let named = std::fs::canonicalize(device).unwrap_or_else(|_| PathBuf::from(device));
+        if let Some((_, why)) = self.unread.iter().find(|(at, _)| Path::new(at) == named) {
+            return Some(why.clone());
+        }
+        match self.disks.is_empty() {
+            true => self.unread.first().map(|(_, why)| why.clone()),
+            false => None,
+        }
+    }
+
+    /// The table one disk's scan read, or a fresh read for a disk the scan
+    /// never listed. A flag names its own disk, and the form still lets the
+    /// user answer one no listing held.
+    pub(crate) fn table(&self, device: &str) -> Result<DiskTable, String> {
+        match self.get(device) {
+            Some(disk) => disk.table.clone(),
+            None => disk_table(device),
+        }
+    }
+
+    /// The disk a form with no answer opens on: a lone disk nothing is on yet
+    /// answers itself. A lone disk holding partitions or content is the user's
+    /// to choose, and `use this disk` is what confirms it. A disk the scan
+    /// could not read keeps the answer open even when it is the only one.
+    pub(crate) fn only_empty_disk(&self) -> Option<String> {
+        match self.disks.as_slice() {
+            [only] if self.unread.is_empty() && only.partitions.is_empty() && !only.carries => {
+                Some(only.device.clone())
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Stops the machine from the installer's screen. The live environment runs

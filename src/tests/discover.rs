@@ -301,6 +301,254 @@ fn a_key_path_cannot_leave_the_system_that_names_it() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// The systems a partition carries are read from what it holds: an ESP's
+/// vendor directories, a filesystem's own `os-release`, or a loader entry's
+/// title. `EFI/BOOT` alone names nothing, and so does a filesystem holding
+/// none of the three.
+#[test]
+fn a_partition_names_the_systems_it_carries() {
+    let names = |carried: &[Carried]| -> Vec<String> {
+        carried.iter().map(|one| one.name.clone()).collect()
+    };
+    let root = scratch("labels");
+    let esp = root.join("esp");
+    std::fs::create_dir_all(esp.join("EFI/fedora")).unwrap();
+    std::fs::create_dir_all(esp.join("EFI/Microsoft/Boot")).unwrap();
+    std::fs::create_dir_all(esp.join("EFI/BOOT")).unwrap();
+    // The directory names sort as they read, so `Microsoft` leads.
+    assert_eq!(names(&labels_at(&esp, "vfat")), ["Microsoft", "fedora"]);
+    let bare = root.join("bare");
+    std::fs::create_dir_all(bare.join("EFI/BOOT")).unwrap();
+    assert!(labels_at(&bare, "vfat").is_empty());
+
+    let system = root.join("system");
+    std::fs::create_dir_all(system.join("etc")).unwrap();
+    std::fs::write(
+        system.join("etc/os-release"),
+        "NAME=Fedora\nPRETTY_NAME=\"Fedora Linux 44\"\n",
+    )
+    .unwrap();
+    assert_eq!(names(&labels_at(&system, "ext4")), ["Fedora Linux 44"]);
+    // A filesystem with no `os-release` falls back to a loader entry's title.
+    // The entries sit under `boot/loader/` on a root and `loader/` on a
+    // separate `/boot`.
+    std::fs::remove_file(system.join("etc/os-release")).unwrap();
+    std::fs::create_dir_all(system.join("boot/loader/entries")).unwrap();
+    std::fs::write(
+        system.join("boot/loader/entries/fedora.conf"),
+        "title Fedora Linux 44 (Workstation)\n",
+    )
+    .unwrap();
+    assert_eq!(
+        names(&labels_at(&system, "ext4")),
+        ["Fedora Linux 44 (Workstation)"]
+    );
+    let boot = root.join("boot");
+    std::fs::create_dir_all(boot.join("loader/entries")).unwrap();
+    std::fs::write(
+        boot.join("loader/entries/fedora.conf"),
+        "title Fedora Linux 44 (Server)\n",
+    )
+    .unwrap();
+    assert_eq!(
+        names(&labels_at(&boot, "ext4")),
+        ["Fedora Linux 44 (Server)"]
+    );
+    assert!(labels_at(&root.join("nothing"), "xfs").is_empty());
+    // A FIFO where the walk reads a name blocks the installer, so only a
+    // regular file is read.
+    let hostile = root.join("hostile");
+    std::fs::create_dir_all(hostile.join("etc")).unwrap();
+    let fifo = hostile.join("etc/os-release");
+    let path = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+    assert!(labels_at(&hostile, "ext4").is_empty());
+    // A symlink out of the mount names another filesystem's file, not this
+    // one's.
+    let linked = root.join("linked");
+    std::fs::create_dir_all(linked.join("etc")).unwrap();
+    let elsewhere = root.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    std::fs::write(
+        elsewhere.join("os-release"),
+        "PRETTY_NAME=\"Not This Disk\"\n",
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(elsewhere.join("os-release"), linked.join("etc/os-release"))
+        .unwrap();
+    assert!(labels_at(&linked, "ext4").is_empty());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The walk reads what each ESP entry boots from the loader's own files:
+/// bootupd's `bootuuid.cfg`, the static `grub.cfg`'s search, or the ESP's own
+/// loader entries. A loader entry is read only where the vendor directory
+/// names nothing itself.
+#[test]
+fn an_esp_entry_names_the_filesystem_its_loader_boots() {
+    let root = scratch("esp-links");
+    let efi = root.join("EFI");
+    std::fs::create_dir_all(efi.join("fedora")).unwrap();
+    std::fs::write(
+        efi.join("fedora/bootuuid.cfg"),
+        "set BOOT_UUID=\"8e0615fb-7297-4b74-97c5-b9b84c0f36ba\"\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(efi.join("systemd")).unwrap();
+    std::fs::create_dir_all(root.join("loader/entries")).unwrap();
+    std::fs::write(
+        root.join("loader/entries/ostree-1.conf"),
+        "title Test OS\noptions root=UUID=6c38207b-7766-446b-a210-b438ae22aa2b \
+         rd.luks.uuid=luks-37be8ca7-8834-4aca-aee0-dd280af10939 rw\n",
+    )
+    .unwrap();
+    let carried = labels_at(&root, "vfat");
+    let names: Vec<&str> = carried.iter().map(|one| one.name.as_str()).collect();
+    assert_eq!(names, ["fedora", "systemd"]);
+    assert_eq!(
+        carried[0].links,
+        [Link::Uuid(
+            "8e0615fb-7297-4b74-97c5-b9b84c0f36ba".to_string()
+        )]
+    );
+    // The loader entry names the root filesystem first and the container the
+    // root lives in second, so a closed container falls back to it.
+    assert_eq!(
+        carried[1].links,
+        [
+            Link::Uuid("6c38207b-7766-446b-a210-b438ae22aa2b".to_string()),
+            Link::Uuid("37be8ca7-8834-4aca-aee0-dd280af10939".to_string()),
+        ]
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A Windows install is named by the GPT types it carries, because it writes
+/// no `os-release` and its ESP may sit on another disk. The reserved
+/// partition tells an install from a data disk that merely uses NTFS, and the
+/// basic data volume is the partition the user recognises.
+#[test]
+fn a_windows_install_is_named_by_the_types_it_carries() {
+    let part = |device: &str, parttype: &str| Partition {
+        device: device.to_string(),
+        parttype: parttype.to_string(),
+        ..Default::default()
+    };
+    let msr = "e3c9e316-0b5c-4db8-817d-f92df00215ae";
+    let data = "ebd0a0a2-b9e5-4433-87c0-68b6b72699c7";
+    let recovery = "de94bba4-06d1-4d40-a16a-bfd50179d6ac";
+    let parts = [
+        part("/dev/sda1", msr),
+        part("/dev/sda2", data),
+        part("/dev/sda3", recovery),
+    ];
+    assert_eq!(
+        windows_label(&parts),
+        Some(("/dev/sda2".to_string(), "Windows".to_string()))
+    );
+    // A reserved and recovery pair with no data volume left still names the
+    // install, on the reserved partition.
+    assert_eq!(
+        windows_label(&[part("/dev/sda1", msr), part("/dev/sda3", recovery)]),
+        Some(("/dev/sda1".to_string(), "Windows".to_string()))
+    );
+    // A data disk that merely uses NTFS, and a stray reserved partition, name
+    // nothing.
+    assert_eq!(windows_label(&[part("/dev/sda2", data)]), None);
+    assert_eq!(windows_label(&[part("/dev/sda1", msr)]), None);
+    assert_eq!(windows_label(&[]), None);
+}
+
+/// A Microsoft entry names a Windows install only when the scan can tell which
+/// one, because a wrong link removes a boot entry for a system the plan keeps.
+#[test]
+fn a_microsoft_entry_links_only_to_the_install_it_can_be_sure_of() {
+    let one = vec!["/dev/sda2".to_string()];
+    let two = vec!["/dev/sda2".to_string(), "/dev/sdb2".to_string()];
+    assert_eq!(
+        windows_link(Some("/dev/sda2"), &two).as_deref(),
+        Some("/dev/sda2")
+    );
+    assert_eq!(windows_link(None, &one).as_deref(), Some("/dev/sda2"));
+    assert_eq!(windows_link(None, &two), None);
+    assert_eq!(windows_link(None, &[]), None);
+}
+
+/// A lone disk answers the disk question only when it holds nothing, because
+/// a disk with partitions is what `use this disk` exists to confirm.
+#[test]
+fn a_lone_disk_answers_only_when_it_is_empty() {
+    let empty = scan_of(&[("/dev/vda", "64G")], &[]);
+    assert_eq!(empty.only_empty_disk().as_deref(), Some("/dev/vda"));
+    let held = scan_of(
+        &[("/dev/vda", "64G")],
+        &[("/dev/vda", vec![Partition::default()])],
+    );
+    assert_eq!(held.only_empty_disk(), None);
+    let two = scan_of(&[("/dev/sda", "16 GB"), ("/dev/vda", "64G")], &[]);
+    assert_eq!(two.only_empty_disk(), None);
+    // A whole-disk filesystem and a whole-disk LVM physical volume leave no
+    // partition children, and the disk still holds a system.
+    let content = |raw: &str| carries_content(raw).expect("lsblk JSON");
+    assert!(content(
+        r#"{"blockdevices":[{"name":"/dev/vda","type":"disk","fstype":"btrfs"}]}"#
+    ));
+    assert!(content(
+        r#"{"blockdevices":[{"name":"/dev/vda","type":"disk","fstype":null,"children":[{"name":"/dev/mapper/vg-root","type":"lvm"}]}]}"#
+    ));
+    assert!(!content(
+        r#"{"blockdevices":[{"name":"/dev/vda","type":"disk","fstype":null,"children":[]}]}"#
+    ));
+    let whole = Scan {
+        unread: Vec::new(),
+        disks: vec![DiskScan {
+            device: "/dev/vda".to_string(),
+            detail: "64G".to_string(),
+            partitions: Vec::new(),
+            carries: true,
+            table: Ok(DiskTable::default()),
+            labels: Vec::new(),
+            keys: Discovered::default(),
+        }],
+    };
+    assert_eq!(whole.only_empty_disk(), None);
+}
+
+/// A disk the scan could not read is not offered, and it keeps the lone-disk
+/// answer open, because the machine still holds the disk the form cannot see.
+#[test]
+fn a_disk_the_scan_could_not_read_is_not_offered() {
+    let why = "lsblk /dev/sdb: I/O error";
+    let mut survivor = scan_of(&[("/dev/vda", "64G")], &[]);
+    survivor
+        .unread
+        .push(("/dev/sdb".to_string(), why.to_string()));
+    assert_eq!(survivor.refusal("/dev/sdb").as_deref(), Some(why));
+    assert_eq!(survivor.refusal("/dev/vda"), None);
+    assert_eq!(survivor.only_empty_disk(), None);
+    // A machine with no readable disk left stops on the first reason.
+    let none = Scan {
+        unread: vec![("/dev/sdb".to_string(), why.to_string())],
+        ..Default::default()
+    };
+    assert_eq!(none.refusal("").as_deref(), Some(why));
+    // A udev alias names the disk the scan read under its kernel name.
+    let root = scratch("unread-alias");
+    let real = root.join("sdb");
+    std::fs::write(&real, b"").unwrap();
+    let alias = root.join("sdb-by-id");
+    std::os::unix::fs::symlink(&real, &alias).unwrap();
+    let aliased = Scan {
+        unread: vec![(real.to_string_lossy().to_string(), why.to_string())],
+        ..Default::default()
+    };
+    assert_eq!(
+        aliased.refusal(&alias.to_string_lossy()).as_deref(),
+        Some(why)
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// A `crypto_LUKS` node carries no filesystem of its own, so the walk takes
 /// the mapper above it instead.
 #[test]

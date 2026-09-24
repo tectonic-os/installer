@@ -51,6 +51,7 @@ fn the_panel_states_the_firmware_and_what_the_image_needs() {
         composefs: false,
         reserve: std::sync::OnceLock::new(),
         luks_initramfs: true,
+        esp_entries: std::sync::OnceLock::new(),
     };
     let payload_of = |boot: &str, bootloader: &str| Payload {
         bootloader: bootloader.to_string(),
@@ -75,6 +76,8 @@ fn the_panel_states_the_firmware_and_what_the_image_needs() {
                 HeaderLine::Pair(label, value)
                 | HeaderLine::Good(label, value)
                 | HeaderLine::Warn(label, value) => format!("{label}: {value}"),
+                // The firmware panel never carries the create window's bar.
+                HeaderLine::Placement { .. } => String::new(),
             })
             .collect()
     };
@@ -88,10 +91,7 @@ fn the_panel_states_the_firmware_and_what_the_image_needs() {
         said(lines.clone(), "repo: ghcr.io/tectonic-os/deb2:latest"),
         "{lines:?}"
     );
-    assert!(
-        said(lines.clone(), "bootloader: grub2 (the base's vendor chain)"),
-        "{lines:?}"
-    );
+    assert!(said(lines.clone(), "bootloader: grub2"), "{lines:?}");
     // A vendor chain asks the firmware for nothing, so the panel drops the
     // Required section.
     assert!(!said(lines.clone(), copy::PANEL_REQUIRED), "{lines:?}");

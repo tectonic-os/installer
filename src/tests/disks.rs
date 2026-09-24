@@ -35,7 +35,7 @@ fn every_shown_description_is_written_as_the_name_fisherman_takes() {
             data: Data::default(),
             layout: None,
         };
-        let fields = answers.fields(&a_payload(), "/dev/vda", None, "", &[]);
+        let fields = answers.fields(&a_payload(), &Scan::default(), "/dev/vda", None, "");
         assert_eq!(fields[ROW_ENCRYPTION].value(), label);
         let read = Answers::of(&fields, "/dev/vda".to_string(), None);
         assert_eq!(read.encryption.kind, name);

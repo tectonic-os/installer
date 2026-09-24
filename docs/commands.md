@@ -60,8 +60,8 @@ screens are run without root.
   carries its own recipe beside the manifest — so a labelled partition
   overrides the media, and someone who attached one did that deliberately.
 - **On a terminal there is one screen and every field is on it**, answered
-  where it stands. The flags and the payload seed a form — disk, computer name,
-  username, password, confirm, encryption, passphrase — and enter on a row edits
+  where it stands. The flags seed a form — disk, hostname, username, password,
+  confirm, encryption, passphrase — and enter on a row edits
   it in place: text is typed into the row, and the disk list opens *under* its
   own row. Nothing hides the other answers while one of them is being changed.
 - **`Install` is dim and unpickable until nothing is missing**, with what it is

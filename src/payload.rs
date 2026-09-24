@@ -50,9 +50,49 @@ pub struct Payload {
     /// userspace driver. An old recipe and an image that made no such claim
     /// both read false.
     pub luks_initramfs: bool,
+    /// Holds the entry directory names the image's staged EFI payloads carry.
+    /// The form reads them once; the first draw that needs them probes the
+    /// image, because no recipe field names them.
+    pub(crate) esp_entries: std::sync::OnceLock<Vec<String>>,
 }
 
+/// Lists the EFI directories the staged boot payloads carry, under bootupd's
+/// update source and under `/boot` where a signed UKI lives. A pattern that
+/// matches nothing stays literal, and the directory test drops it. The `if`
+/// keeps a glob that matched nothing from failing the whole listing. The two
+/// optional arguments let a test give the roots it made itself.
+pub(crate) const ESP_LIST: &str = "for d in \"${1:-/usr/lib/efi}\"/*/*/EFI/*/ \"${2:-/boot/EFI}\"/*/; do if [ -d \"$d\" ]; then printf '%s\\n' \"${d%/}\"; fi; done";
+
 impl Payload {
+    /// Lists the entry directories the image's staged EFI payloads carry. The
+    /// install writes them into the ESP, so the picture shows what replaces
+    /// the entries it removes. An image the probe cannot read gives an empty
+    /// list, and the picture keeps the entries the walk found.
+    pub(crate) fn esp_entries(&self) -> &[String] {
+        self.esp_entries.get_or_init(|| {
+            let out = Command::new("podman")
+                .args([
+                    "run",
+                    "--rm",
+                    "--pull=never",
+                    "--net=none",
+                    "--security-opt",
+                    "label=disable",
+                    "--entrypoint",
+                    "",
+                ])
+                .arg(&self.image)
+                .args(["/bin/sh", "-c", ESP_LIST])
+                .output();
+            match out {
+                Ok(out) if out.status.success() => {
+                    esp::entry_names(&String::from_utf8_lossy(&out.stdout))
+                }
+                _ => Vec::new(),
+            }
+        })
+    }
+
     /// Returns the whole GB a separate home must leave for the root. The
     /// first call probes the image. Every draw of the form after that is
     /// free.
@@ -159,6 +199,7 @@ pub fn classify(root: &Path) -> Result<Found, String> {
             ),
             reserve: std::sync::OnceLock::new(),
             luks_initramfs: matches!(json::field(&doc, "luksInitramfs"), Some(Json::Bool(true))),
+            esp_entries: std::sync::OnceLock::new(),
             recipe,
         }));
     }

@@ -17,12 +17,21 @@ impl Answers {
         if !prompt.draws() {
             return Ok(Some(seeded));
         }
-        let found_disks = disks(&sys_block(), &in_use_now());
+        // Every disk the machine has, read once before the form draws. The
+        // screens render this and read no disk again, so a redraw cannot show
+        // a different disk than the last one.
+        let scan = Scan::read();
         let mut disk = seeded.disk.clone();
-        // One found disk makes the disk question answer itself. The install
-        // opens with that disk taken.
-        if disk.is_empty() && found_disks.len() == 1 {
-            disk = found_disks[0].0.clone();
+        // One found disk nothing is on yet makes the disk question answer
+        // itself. A disk holding partitions is the user's to choose.
+        if disk.is_empty() {
+            disk = scan.only_empty_disk().unwrap_or_default();
+        }
+        // A disk whose partitions could not be read has no picture, so it is
+        // not an install target. A machine with no readable disk left stops
+        // the same way rather than drawing a form nothing can answer.
+        if let Some(why) = scan.refusal(&disk) {
+            return Err(why);
         }
         // The whole-disk kind lives outside the form field. A manual layout
         // that opens a container replaces the encryption row, and a return
@@ -39,7 +48,7 @@ impl Answers {
             _ => chosen,
         };
         let mut layout: Option<CustomLayout> = None;
-        let mut fields = seeded.fields(payload, &disk, layout.as_ref(), "", &[]);
+        let mut fields = seeded.fields(payload, &scan, &disk, layout.as_ref(), "");
         let panel = panel(payload);
         // The disk table keeps its own cursor across the form reopens, so the
         // walk stays on the row the user left. `None` seeds it on the chosen
@@ -50,9 +59,10 @@ impl Answers {
         // question the manual form otherwise hides, which moves the table's
         // row number.
         let mut reopen_on_table = false;
-        // Holds the keys the walk found on old systems, read once per disk.
-        let mut found = Discovered::default();
-        let mut found_disk = String::new();
+        // Opens the table with its own cursor once, for the pass after the user
+        // answered a table row. The owner asked 2026-09-24 that an Assign,
+        // Format or Delete leave the selection on the partition it was made on.
+        let mut focus_table = false;
         // Names the row the form opens on. The disk table returns to its own
         // row, because the top of the form is a long walk back through the
         // setup rows above it.
@@ -72,38 +82,22 @@ impl Answers {
                 (true, _) => Some(CustomLayout::empty(&disk)),
                 (false, _) => None,
             };
-            // A manual layout draws the table from every found disk's
-            // partitions. A whole-disk layout reads none of them.
-            let partitions: Vec<(String, Vec<Partition>)> = match manual {
-                true => found_disks
-                    .iter()
-                    .map(|(at, _)| Ok((at.clone(), partitions(at)?)))
-                    .collect::<Result<_, String>>()?,
-                false => Vec::new(),
-            };
-            let chosen = partitions
-                .iter()
-                .find(|(at, _)| at == &disk)
-                .map(|(_, parts)| parts.as_slice())
+            // The chosen disk's partitions, from the scan. The table draws
+            // every disk from the scan, so nothing is read here.
+            let chosen = scan
+                .get(&disk)
+                .map(|entry| entry.partitions.as_slice())
                 .unwrap_or(&[]);
-            // Reads the disk's partition table on every redraw, so `short_of`
-            // re-takes the room refusal after any answer and not only after a
-            // size is typed. Taking back a delete after a create was sized
-            // would otherwise leave a plan the disk cannot hold. `sfdisk`
-            // would then find it while running, after the other deletes were
-            // written.
+            // `short_of` weighs the plan against the table the form drew, and
+            // re-takes the room refusal after any answer rather than only
+            // after a size is typed. Taking back a delete after a create was
+            // sized would otherwise leave a plan the disk cannot hold. The
+            // scan is what the user saw; `table_changed` at confirm remains
+            // the guard against a disk that moved under the plan.
             let table_now = match manual && !disk.is_empty() {
-                true => Some(disk_table(&disk)?),
+                true => Some(scan.table(&disk)?),
                 false => None,
             };
-            if manual && found_disk != disk {
-                found = old_keys(&disk, chosen);
-                found_disk = disk.clone();
-            }
-            if !manual {
-                found = Discovered::default();
-                found_disk.clear();
-            }
             // A home size the user typed stops shaping the plan once the home
             // row goes back to sharing the root. The home row gates the size.
             let separate = fields[ROW_DATA].value() == copy::DATA_SEPARATE;
@@ -112,10 +106,9 @@ impl Answers {
                 false => String::new(),
             };
             let table = layout_table(
-                &found_disks,
+                &scan,
                 &disk,
                 layout.as_ref(),
-                &partitions,
                 payload,
                 &size,
                 // The plan draws a separate home partition before its size is
@@ -133,7 +126,11 @@ impl Answers {
                     .position(|kind| matches!(kind, RowKind::Disk(at) if at == &disk))
                     .unwrap_or(0),
             };
-            fields[ROW_TABLE] = table.field(clamp_row(&table.selectable, at), !disk.is_empty());
+            fields[ROW_TABLE] = table.field(
+                clamp_row(&table.selectable, at),
+                !disk.is_empty(),
+                std::mem::take(&mut focus_table),
+            );
             // The encryption row asks what the container headers hold once a
             // manual layout opens one. Otherwise it shows the whole-disk
             // kinds.
@@ -191,11 +188,20 @@ impl Answers {
             match filled {
                 Ok(common::ui::Filled::Took(0)) => {
                     let mut answers = Self::of(&fields, disk.clone(), layout.clone());
-                    if let Some(layout) = answers
-                        .layout
-                        .as_mut()
-                        .filter(|layout| !layout.deletes.is_empty() || !layout.creates.is_empty())
-                    {
+                    // The plan carries no picture of the ESP, so the entries
+                    // are read from the scan the form drew from. The
+                    // confirmation below names every one the install removes.
+                    if let Some(held) = answers.layout.as_ref() {
+                        let esp = esp::removals(&scan, held);
+                        if let Some(layout) = answers.layout.as_mut() {
+                            layout.esp = esp;
+                        }
+                    }
+                    if let Some(layout) = answers.layout.as_mut().filter(|layout| {
+                        !layout.deletes.is_empty()
+                            || !layout.creates.is_empty()
+                            || !layout.renames.is_empty()
+                    }) {
                         let shown = table_now
                             .as_ref()
                             .ok_or("the partition table was not available to confirm")?;
@@ -271,6 +277,7 @@ impl Answers {
                 Ok(common::ui::Filled::Table { row, item, child }) => {
                     cursor = Some(row);
                     reopen_on_table = true;
+                    focus_table = true;
                     match table.kinds.get(row) {
                         Some(RowKind::Disk(at)) => {
                             let action = item
@@ -278,26 +285,26 @@ impl Answers {
                                 .copied();
                             match action {
                                 Some(PartAction::Create) => {
-                                    // Offers the room after the last surviving
-                                    // partition, less what the plan already
-                                    // spends. The size question is about the
+                                    // The window opens on the free space the
+                                    // plan leaves, with the plan's own creates
+                                    // placed first. The question is about the
                                     // disk as it stands now.
-                                    let planned: u64 = layout
-                                        .as_ref()
-                                        .map(|held| {
-                                            held.creates.iter().map(|create| create.gb).sum()
-                                        })
+                                    let (deletes, creates) = match layout.as_ref() {
+                                        Some(held) => (held.deletes.clone(), held.creates.clone()),
+                                        None => (Vec::new(), Vec::new()),
+                                    };
+                                    let disk_table = scan.table(at)?;
+                                    let names = scan
+                                        .get(at)
+                                        .map(|entry| slot_names(entry, layout.as_ref()))
                                         .unwrap_or_default();
-                                    let deletes = layout
-                                        .as_ref()
-                                        .map(|held| held.deletes.clone())
-                                        .unwrap_or_default();
-                                    let room = disk_table(at)?
-                                        .appendable_gb(&deletes)
-                                        .saturating_sub(planned);
-                                    if let Some(gb) = ask_size(room)? {
+                                    let rooms = create_rooms(&disk_table, &deletes, &creates);
+                                    let holes =
+                                        create_holes(&disk_table, &deletes, &creates, &names);
+                                    if let Some((offset, gb)) = ask_create(rooms, holes)? {
                                         held_layout(&mut layout, &disk).creates.push(Created {
                                             gb,
+                                            offset,
                                             ..Default::default()
                                         });
                                     }
@@ -314,19 +321,33 @@ impl Answers {
                                         held.deletes =
                                             chosen.iter().map(|part| part.device.clone()).collect();
                                         // A partition planned away keeps no
-                                        // mount and no open.
+                                        // mount, no open and no name.
                                         held.mounts.clear();
                                         held.opens.clear();
+                                        held.renames.clear();
                                     }
                                 }
                                 // A whole-disk pick erases the disk, so the
                                 // user is shown what is on it first. A node
                                 // alone is not enough to recognise a drive by.
                                 // A manual layout already carries the disk's
-                                // partitions on the form.
+                                // partitions on the form, so its pick is taken
+                                // unasked.
                                 _ => {
-                                    if manual || confirm_disk(at, &found_disks)? {
+                                    if manual {
                                         disk = at.clone();
+                                    } else {
+                                        let confirmed = match scan.get(at) {
+                                            Some(entry) => confirm_disk(entry)?,
+                                            // A disk row comes from the scan, so
+                                            // this arm never runs. A miss has no
+                                            // picture to show and takes the disk
+                                            // as the row did.
+                                            None => true,
+                                        };
+                                        if confirmed {
+                                            disk = at.clone();
+                                        }
                                     }
                                 }
                             }
@@ -401,6 +422,25 @@ impl Answers {
                                             {
                                                 create.target.clear();
                                             }
+                                        }
+                                    }
+                                }
+                                // A planned partition is named from its mount
+                                // point until the user types a name, which
+                                // the cut writes into the script.
+                                PartAction::Rename => {
+                                    let Some(create) =
+                                        layout.as_ref().and_then(|held| held.creates.get(index))
+                                    else {
+                                        continue;
+                                    };
+                                    let default = rename_default(&create.target, &create.label);
+                                    if let Some(label) = ask_rename("", &default)? {
+                                        if let Some(create) = layout
+                                            .as_mut()
+                                            .and_then(|held| held.creates.get_mut(index))
+                                        {
+                                            create.label = label;
                                         }
                                     }
                                 }
@@ -519,25 +559,57 @@ impl Answers {
                                         layout
                                             .opens
                                             .retain(|open| open.partition != partition.device);
+                                        layout
+                                            .renames
+                                            .retain(|rename| rename.partition != partition.device);
                                         // Reset is the one item a partition
                                         // planned away still offers, so it is
                                         // also what puts it back.
                                         layout.deletes.retain(|at| at != &partition.device);
                                     }
                                 }
+                                // A renamed partition keeps its other answers.
+                                // The name is written by the cut rather than
+                                // dropped, so `Reset` is what takes it back.
+                                PartAction::Rename => {
+                                    let current = layout
+                                        .as_ref()
+                                        .and_then(|held| held.renamed(&partition.device))
+                                        .unwrap_or(&partition.label)
+                                        .to_string();
+                                    if let Some(label) = ask_rename(&partition.device, &current)? {
+                                        let held = held_layout(&mut layout, &disk);
+                                        held.renames
+                                            .retain(|rename| rename.partition != partition.device);
+                                        // A name equal to the label the
+                                        // partition already carries states
+                                        // nothing, so the plan drops it.
+                                        if label != partition.label {
+                                            held.renames.push(Rename {
+                                                partition: partition.device.clone(),
+                                                label,
+                                            });
+                                        }
+                                    }
+                                }
                                 // A partition planned away loses its answers.
-                                // The install cannot mount, format or open a
-                                // partition that will not be there.
+                                // The install cannot mount, format, open or
+                                // rename a partition that will not be there.
                                 PartAction::Delete => {
                                     let device = partition.device.clone();
                                     let held = held_layout(&mut layout, &disk);
                                     held.mounts.retain(|mount| mount.partition != device);
                                     held.opens.retain(|open| open.partition != device);
+                                    held.renames.retain(|rename| rename.partition != device);
                                     if !held.deletes.contains(&device) {
                                         held.deletes.push(device);
                                     }
                                 }
                                 PartAction::Open => {
+                                    let found = scan
+                                        .get(&disk)
+                                        .map(|entry| entry.keys.clone())
+                                        .unwrap_or_default();
                                     let key = match open_key(
                                         &partition.device,
                                         layout.as_ref(),
@@ -621,13 +693,8 @@ impl Answers {
                         cursor = None;
                         start = 0;
                         left.clear();
-                        fields = Self::seeded(payload, Given::default(), prompt)?.fields(
-                            payload,
-                            &disk,
-                            None,
-                            "",
-                            &[],
-                        )
+                        fields = Self::seeded(payload, Given::default(), prompt)?
+                            .fields(payload, &scan, &disk, None, "")
                     }
                     Leave::Back => {}
                 },
@@ -640,13 +707,8 @@ impl Answers {
                         cursor = None;
                         start = 0;
                         left.clear();
-                        fields = Self::seeded(payload, Given::default(), prompt)?.fields(
-                            payload,
-                            &disk,
-                            None,
-                            "",
-                            &[],
-                        )
+                        fields = Self::seeded(payload, Given::default(), prompt)?
+                            .fields(payload, &scan, &disk, None, "")
                     }
                     Leave::Back => {}
                 },
@@ -661,8 +723,13 @@ impl Answers {
     /// flag.
     pub(crate) fn seeded(payload: &Payload, given: Given, prompt: &Prompt) -> Result<Self, String> {
         if !prompt.draws() {
+            let disk = ask_disk(given.disk, None, prompt)?;
+            // A headless run writes the disk the flags name and draws no
+            // picture, so a disk whose partitions cannot be read stops here
+            // rather than under the write.
+            partitions(&disk)?;
             return Ok(Self {
-                disk: ask_disk(given.disk, None, prompt)?,
+                disk,
                 hostname: prompt.text(
                     given.hostname,
                     copy::INSTALL_NAME,
@@ -693,10 +760,9 @@ impl Answers {
         }
         Ok(Self {
             disk: given.disk.unwrap_or_default(),
-            hostname: given
-                .hostname
-                .filter(|name| !name.is_empty())
-                .unwrap_or_else(|| payload.hostname.clone()),
+            // The owner decided 2026-09-24 that the hostname starts blank. The
+            // payload's own name is not what the machine must be called.
+            hostname: given.hostname.unwrap_or_default(),
             user: given.user.unwrap_or_default(),
             password: given.password.unwrap_or_default(),
             encryption: Encryption {
@@ -724,18 +790,16 @@ impl Answers {
     pub(crate) fn fields(
         &self,
         payload: &Payload,
+        scan: &Scan,
         disk: &str,
         layout: Option<&CustomLayout>,
         var_size: &str,
-        partitions: &[(String, Vec<Partition>)],
     ) -> Vec<common::ui::Field> {
         use common::ui::Field;
-        let found = disks(&sys_block(), &in_use_now());
         let table = layout_table(
-            &found,
+            scan,
             disk,
             layout,
-            partitions,
             payload,
             var_size,
             !self.data.size.is_empty(),
@@ -769,7 +833,7 @@ impl Answers {
                 &self.data.size,
                 "GB",
             ),
-            table.field(0, !disk.is_empty()),
+            table.field(0, !disk.is_empty(), false),
             Field::secret(copy::ROW_PASSPHRASE, &self.encryption.passphrase),
             Field::secret(copy::ROW_PIN, &self.encryption.pin),
         ]
@@ -867,6 +931,17 @@ impl Answers {
                         (copy::ROW_REMOVED.to_string(), copy::summary_deleted(device))
                     }),
                 );
+                // An ESP entry that boots a system the plan rewrites goes with
+                // the partitions above it, and the image writes its own entry
+                // afterwards.
+                rows.extend(layout.esp.iter().flat_map(|removal| {
+                    removal.entries.iter().map(|entry| {
+                        (
+                            copy::ROW_REMOVED.to_string(),
+                            copy::summary_esp(entry, &removal.partition),
+                        )
+                    })
+                }));
                 // A created partition is named by its mount point, as a kept
                 // or formatted one is. The disk table the user just left shows
                 // the node it will get.

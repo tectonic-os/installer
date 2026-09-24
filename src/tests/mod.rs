@@ -7,6 +7,7 @@ mod boot;
 mod discover;
 mod disks;
 mod editor;
+mod esp;
 mod etcwrite;
 mod fdisk;
 mod form;
@@ -57,6 +58,7 @@ fn a_payload() -> Payload {
         composefs: false,
         reserve: std::sync::OnceLock::new(),
         luks_initramfs: true,
+        esp_entries: std::sync::OnceLock::new(),
     };
     // `image_gb` runs podman, which no test does, so the fixture presets
     // the 10 GB `root_reserve` falls back to for an unmeasurable image.
@@ -64,7 +66,69 @@ fn a_payload() -> Payload {
         .reserve
         .set(10)
         .expect("a reserve nothing has read yet");
+    // The probe into the image is a podman run as well, so the fixture holds
+    // the entries a payload writes and a case that needs them sets its own.
     payload
+        .esp_entries
+        .set(Vec::new())
+        .expect("entries nothing has read yet");
+    payload
+}
+
+/// Holds the payload `a_payload` describes with the ESP entries one image
+/// writes, for the table cases that draw what replaces an entry.
+fn a_payload_writing(entries: &[&str]) -> Payload {
+    let mut payload = a_payload();
+    payload.esp_entries = std::sync::OnceLock::new();
+    payload
+        .esp_entries
+        .set(entries.iter().map(|entry| entry.to_string()).collect())
+        .expect("entries nothing has read yet");
+    payload
+}
+
+/// Names one partition the walk read, for the label cases that place a
+/// system on a device.
+fn part(device: &str, fstype: &str) -> Partition {
+    Partition {
+        device: device.to_string(),
+        fstype: fstype.to_string(),
+        ..Default::default()
+    }
+}
+
+/// Names one system row a partition carries, for the cases that build a scan
+/// by hand. The link stays empty, because these cases place no system.
+fn label(name: &str) -> Label {
+    Label {
+        name: name.to_string(),
+        link: String::new(),
+    }
+}
+
+/// Builds the scan a table case draws from the disk rows and partitions it
+/// holds. The table and the walk come back empty, because these cases draw
+/// the picture alone.
+fn scan_of(disks: &[(&str, &str)], parts: &[(&str, Vec<Partition>)]) -> Scan {
+    Scan {
+        unread: Vec::new(),
+        disks: disks
+            .iter()
+            .map(|(device, detail)| DiskScan {
+                device: device.to_string(),
+                detail: detail.to_string(),
+                partitions: parts
+                    .iter()
+                    .find(|(at, _)| at == device)
+                    .map(|(_, parts)| parts.to_vec())
+                    .unwrap_or_default(),
+                carries: false,
+                table: Ok(DiskTable::default()),
+                labels: Vec::new(),
+                keys: Discovered::default(),
+            })
+            .collect(),
+    }
 }
 
 /// Holds what `emit::recipe::build` emits for a Debian target, which is what

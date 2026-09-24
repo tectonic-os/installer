@@ -27,8 +27,8 @@ pub(crate) struct DiskTable {
     pub(crate) last: u64,
     pub(crate) sector: u64,
     /// The table label the reader reports, `gpt` or `dos`, and empty for a
-    /// disk that carries no table. `wrong_label_for` refuses a create on a
-    /// `dos` label the plan does not clear.
+    /// disk that carries no table. `wrong_label_for` refuses a create or a
+    /// planned name on a `dos` label the plan does not clear.
     pub(crate) label: String,
     pub(crate) slots: Vec<Slot>,
 }
@@ -44,39 +44,88 @@ pub(crate) struct DiskState {
     pub(crate) table: DiskTable,
 }
 
+/// One free span of a disk's partition table, in the disk's own sectors.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Region {
+    pub(crate) start: u64,
+    pub(crate) sectors: u64,
+}
+
 impl DiskTable {
-    /// The sectors an appended partition can be cut from. The region runs
-    /// from the end of the highest-ending partition that survives the planned
-    /// deletes to `last`.
+    /// The free spans this table leaves once the planned deletes have run, in
+    /// sector order. A delete merges the free space on both its sides, because
+    /// the partition that separated them is gone.
     ///
-    /// The region is smaller than the disk's free space, and smaller than
-    /// `sfdisk` sometimes uses. Measured 2026-09-19 on util-linux 2.41.5
-    /// (`measurements/sfdisk-append.md`), `--append` takes the highest free
-    /// region that fits. A 10M append skipped a free 20M hole at sector 43008
-    /// and took the tail at 124928. A 50M append with only a 15M tail did land
-    /// in a 244M hole. Measuring the tail alone is therefore conservative. It
-    /// can refuse a create that would have fitted in a hole. It can never
-    /// accept one that overruns. A refused layout costs the user a retry. An
-    /// accepted impossible one costs the disk, because `sfdisk` shrinks the
-    /// partition silently.
-    pub(crate) fn appendable(&self, deletes: &[String]) -> u64 {
-        // A plan that removes every partition writes a fresh GPT label
-        // instead of appending, so the room is the whole usable disk. A blank
-        // disk takes this branch too, because it leaves no surviving partition
-        // to measure from.
+    /// The spans are raw. A create is placed in one through `aligned`, which
+    /// rounds a span to the sectors `sfdisk` can actually fill.
+    pub(crate) fn regions(&self, deletes: &[String]) -> Vec<Region> {
         let gone = deleted_slots(deletes);
-        let end = match self.cleared_by(deletes) {
-            true => self.first,
+        let mut survivors: Vec<&Slot> = match self.cleared_by(deletes) {
+            true => Vec::new(),
             false => self
                 .slots
                 .iter()
                 .filter(|slot| !gone.contains(&slot.number))
-                .map(|slot| slot.start.saturating_add(slot.sectors))
-                .max()
-                .unwrap_or(self.first)
-                .max(self.first),
+                .collect(),
         };
-        self.last.saturating_add(1).saturating_sub(end)
+        survivors.sort_by_key(|slot| slot.start);
+        let mut regions = Vec::new();
+        let mut at = self.first;
+        for slot in survivors {
+            if slot.start > at {
+                regions.push(Region {
+                    start: at,
+                    sectors: slot.start - at,
+                });
+            }
+            at = at.max(slot.start.saturating_add(slot.sectors));
+        }
+        if at <= self.last {
+            regions.push(Region {
+                start: at,
+                sectors: self.last.saturating_add(1) - at,
+            });
+        }
+        regions
+    }
+
+    /// Rounds one raw span to the sectors a create may fill. `sfdisk` aligns a
+    /// partition to 1 MiB and shaves an unaligned end, so a span the placement
+    /// accepts must be one a whole-GB partition fits inside. Trimming both
+    /// ends here keeps the arithmetic from accepting a span the cut would
+    /// silently shrink into.
+    pub(crate) fn aligned(&self, region: &Region) -> Region {
+        let align = self.alignment();
+        let start = region.start.div_ceil(align) * align;
+        let end = (region.start.saturating_add(region.sectors)) / align * align;
+        Region {
+            start,
+            sectors: end.saturating_sub(start),
+        }
+    }
+
+    /// The sectors `sfdisk` aligns a partition to, which is 1 MiB. A table
+    /// that reports no sector size is read in 512-byte sectors.
+    fn alignment(&self) -> u64 {
+        match self.sector {
+            0 => 2048,
+            sector => (1_048_576 / sector).max(1),
+        }
+    }
+
+    /// Gives the whole GB any offset-and-size pair the create window accepts
+    /// can be placed in, which is the unit that window asks in. Two sectors
+    /// cover the alignment `place_creates` adds to the offset and the size, so
+    /// a pair this room accepts never overruns the region it lands in. The
+    /// division floors, so a span smaller than a GB offers no room.
+    pub(crate) fn placeable_gb(&self, region: &Region) -> u64 {
+        let region = self.aligned(region);
+        let sector = self.sector.max(1);
+        region
+            .sectors
+            .saturating_mul(sector)
+            .saturating_sub(2 * sector.saturating_sub(1))
+            / 1_000_000_000
     }
 
     /// Whether the planned deletes remove every partition in this table. A
@@ -87,32 +136,30 @@ impl DiskTable {
         self.slots.is_empty() || self.slots.iter().all(|slot| gone.contains(&slot.number))
     }
 
-    /// Why this disk cannot take a created partition beside the ones it keeps.
-    /// Only a GPT disk is appended to. A `dos` label numbers an appended
-    /// partition by rules `appended_slots` does not predict, and this
-    /// project's images boot from an ESP that a GPT type GUID identifies.
-    /// Clearing the disk is always allowed, because that writes a new GPT
-    /// label instead of appending to the old one.
-    pub(crate) fn wrong_label_for(&self, deletes: &[String], creates: usize) -> Option<String> {
-        // A layout that creates nothing never appends, so the append
-        // numbering this guard protects does not apply to it. Its deletes
-        // still run `sfdisk`, so the reason is the numbering and not an
-        // untouched partition table.
-        if creates == 0 {
+    /// Why this disk cannot take a created partition or a planned name beside
+    /// the partitions it keeps. Only a GPT disk is appended to and only a GPT
+    /// partition carries a label. A `dos` label numbers an appended partition
+    /// by rules `appended_slots` does not predict, and this project's images
+    /// boot from an ESP that a GPT type GUID identifies. Clearing the disk is
+    /// always allowed, because that writes a new GPT label instead of
+    /// appending to the old one.
+    pub(crate) fn wrong_label_for(
+        &self,
+        deletes: &[String],
+        creates: usize,
+        renames: usize,
+    ) -> Option<String> {
+        // A layout that cuts nothing and names nothing never uses the GPT
+        // features this guard protects, so the guard does not apply to it.
+        // Its deletes still run `sfdisk`, so the reason is the append
+        // numbering and not an untouched partition table.
+        if creates == 0 && renames == 0 {
             return None;
         }
         match self.label.is_empty() || self.label == "gpt" || self.cleared_by(deletes) {
             true => None,
             false => Some(copy::custom_not_gpt(&self.label)),
         }
-    }
-
-    /// The same room in whole GB, which is the unit the editor screen asks in
-    /// and the refusal states. The installer draws every size in decimal GB.
-    pub(crate) fn appendable_gb(&self, deletes: &[String]) -> u64 {
-        self.appendable(deletes)
-            .saturating_mul(self.sector)
-            .saturating_div(1_000_000_000)
     }
 
     /// The slot numbers that survive the planned deletes, which is what
@@ -197,6 +244,159 @@ pub(crate) fn appended_slots(taken: &[usize], count: usize) -> Vec<usize> {
         number += 1;
     }
     given
+}
+
+/// Holds the room a plan's next create has: the first free region's whole GB,
+/// which is the size the create window opens on, and the largest free
+/// region's whole GB, which is the most one create can take.
+pub(crate) struct Rooms {
+    pub(crate) first: u64,
+    pub(crate) largest: u64,
+}
+
+/// Places every create in a free region, in the order the plan holds them, and
+/// returns each create's starting sector and the regions left over. A create
+/// takes the lowest region with room for its offset and size, so the hole a
+/// delete left is used before the tail.
+///
+/// `Err` carries the largest free region in whole GB, which is what a refusal
+/// states: the plan could not use it.
+pub(crate) fn place_creates(
+    table: &DiskTable,
+    deletes: &[String],
+    creates: &[Created],
+) -> Result<(Vec<u64>, Vec<Region>), u64> {
+    let sector = table.sector.max(1);
+    let mut free = table.regions(deletes);
+    let mut starts = Vec::new();
+    for create in creates {
+        let before = create.offset.saturating_mul(1_000_000_000).div_ceil(sector);
+        let size = create.gb.saturating_mul(1_000_000_000).div_ceil(sector);
+        let chosen = free.iter().position(|region| {
+            let aligned = table.aligned(region);
+            before.saturating_add(size) <= aligned.sectors
+        });
+        let Some(at) = chosen else {
+            let largest = free
+                .iter()
+                .map(|region| table.placeable_gb(region))
+                .max()
+                .unwrap_or(0);
+            return Err(largest);
+        };
+        let region = free.remove(at);
+        let aligned = table.aligned(&region);
+        let start = aligned.start.saturating_add(before);
+        starts.push(start);
+        // The head and the tail the create did not take stay free, so a later
+        // create can use them.
+        if aligned.start < start {
+            free.push(Region {
+                start: aligned.start,
+                sectors: start - aligned.start,
+            });
+        }
+        let end = start.saturating_add(size);
+        let last = region.start.saturating_add(region.sectors);
+        if end < last {
+            free.push(Region {
+                start: end,
+                sectors: last - end,
+            });
+        }
+        free.sort_by_key(|region| region.start);
+    }
+    Ok((starts, free))
+}
+
+/// Gives the room the create window offers, with the plan's own creates placed
+/// first, so a second create sees what the first left. The size opens on the
+/// first free region with room for a whole GB, which is the hole a delete made
+/// or the tail, and the largest region is the most one create can take.
+pub(crate) fn create_rooms(table: &DiskTable, deletes: &[String], creates: &[Created]) -> Rooms {
+    let free = match place_creates(table, deletes, creates) {
+        Ok((_, free)) => free,
+        // A plan that no longer fits has no room to offer. The window's own
+        // refusal states the region that could not be used.
+        Err(largest) => return Rooms { first: 0, largest },
+    };
+    // `place_creates` leaves the regions in start order, and the size opens on
+    // the first one. A region smaller than a GB offers no whole-GB create, so
+    // the size opens on the first region a create could actually take.
+    let rooms = free
+        .iter()
+        .map(|region| table.placeable_gb(region))
+        .filter(|room| *room > 0);
+    let mut first = 0;
+    let mut largest = 0;
+    for room in rooms {
+        if first == 0 {
+            first = room;
+        }
+        largest = largest.max(room);
+    }
+    Rooms { first, largest }
+}
+
+/// Gives each free region the plan leaves, with the partitions on either side
+/// of it, for the bar the create window draws. The plan's own creates are
+/// placed first, as `create_rooms` places them. `names` holds the name the
+/// layout table draws each slot number by.
+pub(crate) fn create_holes(
+    table: &DiskTable,
+    deletes: &[String],
+    creates: &[Created],
+    names: &[(usize, String)],
+) -> Vec<common::ui::Hole> {
+    let Ok((starts, free)) = place_creates(table, deletes, creates) else {
+        return Vec::new();
+    };
+    let sector = table.sector.max(1);
+    let gone = deleted_slots(deletes);
+    let mut taken: Vec<(usize, u64, u64)> = table
+        .slots
+        .iter()
+        .filter(|slot| !gone.contains(&slot.number))
+        .map(|slot| {
+            (
+                slot.number,
+                slot.start,
+                slot.start.saturating_add(slot.sectors),
+            )
+        })
+        .collect();
+    let numbers = appended_slots(&table.surviving(deletes), creates.len());
+    for ((number, start), create) in numbers.into_iter().zip(starts).zip(creates) {
+        let size = create.gb.saturating_mul(1_000_000_000).div_ceil(sector);
+        taken.push((number, start, start.saturating_add(size)));
+    }
+    // A slot the names miss still bounds its region. It draws by its number,
+    // because a missing box would read as the start or the end of the disk.
+    let named = |slot: &(usize, u64, u64)| {
+        names
+            .iter()
+            .find(|(number, _)| *number == slot.0)
+            .map_or_else(|| slot.0.to_string(), |(_, name)| name.clone())
+    };
+    free.iter()
+        .filter_map(|region| {
+            let gb = table.placeable_gb(region);
+            let end = region.start.saturating_add(region.sectors);
+            let before = taken
+                .iter()
+                .filter(|slot| slot.2 <= region.start)
+                .max_by_key(|slot| slot.2);
+            let after = taken
+                .iter()
+                .filter(|slot| slot.1 >= end)
+                .min_by_key(|slot| slot.1);
+            (gb > 0).then(|| common::ui::Hole {
+                before: before.map(named),
+                after: after.map(named),
+                gb,
+            })
+        })
+        .collect()
 }
 
 /// Reads the key lines and partition lines of `sfdisk --dump`. An unrecognised
@@ -302,7 +502,7 @@ pub(crate) fn sfdisk_table(disk: &str) -> Result<DiskTable, String> {
     // reserve.
     if table.last == 0 {
         table.first = 2048;
-        // `appendable_gb` multiplies this span by `table.sector`, so the span
+        // `placeable_gb` multiplies this span by `table.sector`, so the span
         // counts the disk's own sectors. Counting a 4Kn disk in 512-byte
         // sectors reports eight times the room it has, which is the divergence
         // the 4Kn comparison case pins.
@@ -438,13 +638,14 @@ pub(crate) fn created_type(target: &str) -> &'static str {
 
 /// Cuts the partitions the layout planned. The deletes run first, so their
 /// slots are free for the appends to take. Every create then follows in one
-/// `sfdisk` call, which hands them the lowest free numbers in order.
+/// `sfdisk` call, which hands them the lowest free numbers in order, and every
+/// rename follows that.
 ///
 /// `run` calls this before it opens, formats or mounts any volume, because
 /// every later step names devices that do not exist until this returns. A
-/// layout that planned no delete and no create runs no `sfdisk`.
+/// layout that planned no delete, no create and no rename runs no `sfdisk`.
 pub(crate) fn cut_partitions(layout: &mut CustomLayout) -> Result<(), String> {
-    if layout.deletes.is_empty() && layout.creates.is_empty() {
+    if layout.deletes.is_empty() && layout.creates.is_empty() && layout.renames.is_empty() {
         return Ok(());
     }
     let _lock = DiskLock::take(&layout.disk)?;
@@ -479,14 +680,16 @@ pub(crate) fn cut_partitions(layout: &mut CustomLayout) -> Result<(), String> {
 /// against a file-backed table, which grows no nodes, so the table it wrote
 /// is the whole of what it did.
 pub(crate) fn apply_cuts(layout: &CustomLayout) -> Result<Vec<usize>, String> {
-    if layout.deletes.is_empty() && layout.creates.is_empty() {
+    if layout.deletes.is_empty() && layout.creates.is_empty() && layout.renames.is_empty() {
         return Ok(Vec::new());
     }
     // The table is read before any write, because the editor screen predicted
-    // the new slot numbers from the surviving slots. Reading the table after
+    // the new slot numbers and the placement from it. Reading the table after
     // the deletes would read that prediction off the change it predicts.
     let table = disk_table(&layout.disk)?;
-    if let Some(why) = table.wrong_label_for(&layout.deletes, layout.creates.len()) {
+    if let Some(why) =
+        table.wrong_label_for(&layout.deletes, layout.creates.len(), layout.renames.len())
+    {
         return Err(why);
     }
     // A table no partition survives is replaced instead of edited. The
@@ -501,19 +704,28 @@ pub(crate) fn apply_cuts(layout: &CustomLayout) -> Result<Vec<usize>, String> {
         true => appended_slots(&[], layout.creates.len()),
         false => appended_slots(&table.surviving(&layout.deletes), layout.creates.len()),
     };
-    // Every delete is numbered before the disk is written, and before the
-    // branch, so the guard does not depend on which arm runs. A delete the
-    // installer cannot number used to fail inside the loop below, once the
-    // deletes before it had already run, which left the disk part way through
-    // a plan and reported only the entry it stopped on. `deleted_slots` drops
-    // such an entry, so the editor screen drew a plan the loop would refuse.
-    // `partition_number` is the one test of what is numberable, which is what
-    // keeps the readers and this loop from disagreeing about it.
+    // Every delete and every rename is numbered before the disk is written, so
+    // an entry the installer cannot number refuses while the table is whole.
+    // `deleted_slots` drops such an entry, so the editor screen drew a plan
+    // the loop would refuse. `partition_number` is the one test of what is
+    // numberable, which is what keeps the readers and this loop from
+    // disagreeing about it.
     let numbered = layout
         .deletes
         .iter()
         .map(|device| partition_number(device).map(|number| (device, number)))
         .collect::<Result<Vec<_>, _>>()?;
+    let renamed = layout
+        .renames
+        .iter()
+        .map(|rename| partition_number(&rename.partition).map(|number| (rename, number)))
+        .collect::<Result<Vec<_>, _>>()?;
+    // The placement is computed before the first write, so a plan the disk
+    // cannot hold refuses while the table is whole. `layout_short_of` refused
+    // the same plan on the form's own table; a different answer here means the
+    // disk moved while the plan was reviewed.
+    let (starts, _) = place_creates(&table, &layout.deletes, &layout.creates)
+        .map_err(|room| copy::custom_too_big(room))?;
     match cleared {
         true => sfdisk_script(&layout.disk, &[], "label: gpt\n")?,
         false => {
@@ -532,29 +744,38 @@ pub(crate) fn apply_cuts(layout: &CustomLayout) -> Result<Vec<usize>, String> {
             }
         }
     }
-    if layout.creates.is_empty() {
-        return Ok(Vec::new());
+    if !layout.creates.is_empty() {
+        let script: String = layout
+            .creates
+            .iter()
+            .zip(&starts)
+            .map(|(create, start)| {
+                let name = match create.label.is_empty() {
+                    true => String::new(),
+                    false => format!(", name=\"{}\"", create.label),
+                };
+                format!(
+                    "start={start}, size={}GB, type={}{name}\n",
+                    create.gb,
+                    created_type(&create.target)
+                )
+            })
+            .collect();
+        sfdisk_script(&layout.disk, &["--append"], &script)?;
+        // `sfdisk` does not refuse a size the disk cannot hold, and it shrinks
+        // the partition silently. The editor refuses the room before the form
+        // closes, so a short partition here means that arithmetic was wrong.
+        // A root quietly smaller than the user asked for, on a disk already
+        // cut, is worth stopping the install for.
+        let after = disk_table(&layout.disk)?;
+        check_created_slots(layout, &numbers, &after)?;
     }
-    let script: String = layout
-        .creates
-        .iter()
-        .map(|create| {
-            format!(
-                "size={}GB, type={}\n",
-                create.gb,
-                created_type(&create.target)
-            )
-        })
-        .collect();
-    sfdisk_script(&layout.disk, &["--append"], &script)?;
-    // `sfdisk` does not refuse a size the disk cannot hold. Measured
-    // 2026-09-19, `size=1GB` on a 200 MiB disk produced a 197M partition and
-    // exited 0 with an empty stderr. The editor refuses the room before the
-    // form closes, so a short partition here means that arithmetic was wrong.
-    // A root quietly smaller than the user asked for, on a disk already cut,
-    // is worth stopping the install for.
-    let after = disk_table(&layout.disk)?;
-    check_created_slots(layout, &numbers, &after)?;
+    // A rename runs last, so a name that cannot be written is reported once
+    // every planned partition exists. It changes no slot, so the create checks
+    // above read the same table either way.
+    for (rename, number) in renamed {
+        part_label(&layout.disk, number, &rename.label)?;
+    }
     Ok(numbers)
 }
 
@@ -630,6 +851,32 @@ fn sfdisk_script(disk: &str, args: &[&str], script: &str) -> Result<(), String> 
             "the cut could not write the partition table on {disk}: {}\n\nthe \
              partition table on {disk} may already have been changed",
             String::from_utf8_lossy(&out.stderr).trim()
+        )),
+    }
+}
+
+/// Writes one existing partition's label through `sfdisk --part-label`. The
+/// label is a GPT name, which no boot chain reads, so this runs after the
+/// deletes and the creates and reports a failure with the warning that the
+/// table may already have moved. The slot number names the partition, because
+/// a `/dev/mapper` disk names its partition nodes by rules the screen cannot
+/// predict.
+fn part_label(disk: &str, number: usize, label: &str) -> Result<(), String> {
+    let out = Command::new("sfdisk")
+        .args(["-q", "--part-label", disk, &number.to_string(), label])
+        .output()
+        .map_err(|err| {
+            format!(
+                "sfdisk --part-label: {err}\n\n{}",
+                copy::table_already_changed(disk)
+            )
+        })?;
+    match out.status.success() {
+        true => Ok(()),
+        false => Err(format!(
+            "the cut could not name partition {number} on {disk}: {}\n\n{}",
+            String::from_utf8_lossy(&out.stderr).trim(),
+            copy::table_already_changed(disk)
         )),
     }
 }

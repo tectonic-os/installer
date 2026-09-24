@@ -101,7 +101,7 @@ impl Context {
 
     /// Names the label libfdisk recognised, `gpt` or `dos`. An unpartitioned
     /// disk carries no label and answers with an empty string, which is what
-    /// `wrong_label_for` reads when it refuses a create.
+    /// `wrong_label_for` reads when it refuses a create or a planned name.
     fn label(&self) -> String {
         if unsafe { fdisk_has_label(self.cxt) } == 0 {
             return String::new();

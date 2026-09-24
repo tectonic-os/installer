@@ -95,7 +95,18 @@ fn the_whole_disk_form_refuses_a_seeded_tpm2_kind_without_a_tpm() {
         ),
         Field::pick(copy::ROW_DATA, vec![Choice::new(copy::NONE, "")], Some(0)),
         Field::text(copy::ROW_SIZE, ""),
-        Field::table("disk", "disk", &[], vec![], vec![], vec![], 0, false),
+        Field::table(
+            "disk",
+            "disk",
+            &[],
+            &[],
+            vec![],
+            vec![],
+            vec![],
+            0,
+            false,
+            false,
+        ),
         Field::secret(copy::ROW_PASSPHRASE, ""),
     ];
     assert_eq!(
@@ -134,7 +145,18 @@ fn the_whole_disk_form_refuses_a_seeded_pin_kind_with_no_pin() {
         ),
         Field::pick(copy::ROW_DATA, vec![Choice::new(copy::NONE, "")], Some(0)),
         Field::text(copy::ROW_SIZE, ""),
-        Field::table("disk", "disk", &[], vec![], vec![], vec![], 0, false),
+        Field::table(
+            "disk",
+            "disk",
+            &[],
+            &[],
+            vec![],
+            vec![],
+            vec![],
+            0,
+            false,
+            false,
+        ),
         Field::secret(copy::ROW_PASSPHRASE, ""),
         Field::secret(copy::ROW_PIN, ""),
     ];
@@ -173,6 +195,7 @@ fn the_confirm_screen_shows_what_is_about_to_be_erased() {
             composefs: false,
             reserve: std::sync::OnceLock::new(),
             luks_initramfs: true,
+            esp_entries: std::sync::OnceLock::new(),
         }),
         vec![
             (copy::ROW_DISK.to_string(), "/dev/vda".to_string()),
@@ -221,10 +244,12 @@ fn a_home_size_the_disk_cannot_hold_is_refused() {
             copy::DISK_SELECTION,
             copy::ROW_DISK,
             &copy::layout_headings(),
+            &[],
             vec![row],
             vec![true],
             vec![Vec::new()],
             0,
+            false,
             answered,
         )
     };
@@ -300,7 +325,18 @@ fn the_passphrase_is_never_a_row_and_the_manual_rows_come_and_go() {
             encryption,
             Field::pick(copy::ROW_DATA, vec![Choice::new(copy::NONE, "")], Some(0)),
             Field::text(copy::ROW_SIZE, ""),
-            Field::table("disk", "disk", &[], vec![], vec![], vec![], 0, false),
+            Field::table(
+                "disk",
+                "disk",
+                &[],
+                &[],
+                vec![],
+                vec![],
+                vec![],
+                0,
+                false,
+                false,
+            ),
             Field::secret(copy::ROW_PASSPHRASE, ""),
         ]
     };
@@ -359,7 +395,18 @@ fn the_action_says_what_the_form_is_short_of() {
             ),
             Field::pick(copy::ROW_DATA, vec![Choice::new(copy::NONE, "")], Some(0)),
             Field::text(copy::ROW_SIZE, ""),
-            Field::table("disk", "disk", &[], vec![], vec![], vec![], 0, false),
+            Field::table(
+                "disk",
+                "disk",
+                &[],
+                &[],
+                vec![],
+                vec![],
+                vec![],
+                0,
+                false,
+                false,
+            ),
             Field::secret(copy::ROW_PASSPHRASE, passphrase),
         ]
     };

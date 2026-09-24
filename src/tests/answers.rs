@@ -8,7 +8,7 @@ fn a_created_partition_answers_the_same_rules() {
         gb,
         target: target.to_string(),
         fstype: fstype.to_string(),
-        device: String::new(),
+        ..Default::default()
     };
     let held = |creates: Vec<Created>| CustomLayout {
         disk: "/dev/vda".to_string(),
@@ -74,12 +74,14 @@ fn a_created_partition_reaches_the_recipe_as_the_node_it_got() {
             target: "/boot/efi".to_string(),
             fstype: "fat32".to_string(),
             device: "/dev/vda1".to_string(),
+            ..Default::default()
         },
         Created {
             gb: 8,
             target: "/swap".to_string(),
             fstype: "swap".to_string(),
             device: "/dev/vda2".to_string(),
+            ..Default::default()
         },
     ];
     let root = scratch("created-recipe");
@@ -160,14 +162,20 @@ fn the_confirmation_names_every_partition_it_will_remove() {
                     target: "/boot/efi".to_string(),
                     fstype: "fat32".to_string(),
                     device: String::new(),
+                    ..Default::default()
                 },
                 Created {
                     gb: 400,
                     target: "/".to_string(),
                     fstype: "btrfs".to_string(),
                     device: String::new(),
+                    ..Default::default()
                 },
             ],
+            esp: vec![EspRemoval {
+                partition: "/dev/sda1".to_string(),
+                entries: vec!["fedora".to_string()],
+            }],
             ..Default::default()
         }),
     };
@@ -184,6 +192,12 @@ fn the_confirmation_names_every_partition_it_will_remove() {
     }
     // The summary marks a removal DELETED, which is louder than format.
     assert_eq!(flat.matches("DELETED").count(), 3, "{flat}");
+    // An ESP entry the plan replaces is named under the same `removed` row,
+    // because its system goes with the partitions above it.
+    assert!(
+        flat.contains(&copy::summary_esp("fedora", "/dev/sda1")),
+        "{flat}"
+    );
     // A planned partition appears by its mount point.
     assert!(flat.contains("400 GB"), "{flat}");
     assert!(flat.contains("/boot/efi"), "{flat}");
@@ -474,4 +488,21 @@ fn the_opened_rows_answer_reads_back() {
     assert_eq!(Opened::of(copy::OPENED_ADD_KEY), Opened::AddKey);
     assert_eq!(Opened::of(copy::OPENED_KEEP), Opened::Keep);
     assert_eq!(Opened::of("anything else"), Opened::Keep);
+}
+
+/// A headless run names its disk by flag and draws no picture, so a disk
+/// whose partitions cannot be read is refused before the writer sees it.
+#[test]
+fn a_headless_run_refuses_a_disk_it_cannot_read() {
+    let given = Given {
+        disk: Some("/nonexistent/tect-none".to_string()),
+        hostname: Some("deb2".to_string()),
+        user: Some("tect".to_string()),
+        password: Some("hunter2".to_string()),
+        ..Default::default()
+    };
+    match Answers::seeded(&a_payload(), given, &Prompt::silent()) {
+        Err(said) => assert!(said.contains("lsblk"), "{said}"),
+        Ok(_) => panic!("a disk lsblk cannot read is refused"),
+    }
 }

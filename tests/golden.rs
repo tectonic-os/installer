@@ -91,6 +91,9 @@ fn drawn_flow(name: &str, dir: &Path, command: &str, after: &str, steps: &[&[u8]
         // A TPM on the host adds the `tpm2-` kinds to the encryption window,
         // so the probe is pointed at a path no machine carries.
         .env("TECT_TPM", "/nonexistent")
+        // A caret that redraws on a clock would put frames in the transcript
+        // that depend on the runner's timing rather than on the keys typed.
+        .env("TECT_CARET", "static")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -120,7 +123,25 @@ fn drawn_flow(name: &str, dir: &Path, command: &str, after: &str, steps: &[&[u8]
         input.write_all(keys).unwrap();
         input.flush().unwrap();
     }
-    let status = child.wait().unwrap();
+    // A walk that derails leaves the installer on a screen no step answers.
+    // The deadline turns that into a failure with the frames it drew, where an
+    // unending wait hides which frame went wrong.
+    let deadline = std::time::Instant::now() + Duration::from_secs(120);
+    let status = loop {
+        match child.try_wait().unwrap() {
+            Some(status) => break status,
+            None if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(50))
+            }
+            None => {
+                // A kill that fails leaves the wait below with no deadline.
+                child
+                    .kill()
+                    .expect("the installer is killed at the deadline");
+                break child.wait().unwrap();
+            }
+        }
+    };
     reader.join().unwrap();
     let mut errors = String::new();
     child
@@ -323,15 +344,56 @@ esac
             .unwrap();
     }
     assert!(child.wait().unwrap().success());
-    // The walk over the old system mounts what the disk holds read-only. The
-    // fixture answers both `mount` and `umount` and mounts nothing, because
-    // the disk does not exist on this rig. A VM proof covers what the walk
-    // does with a real disk.
-    for name in ["mount", "umount"] {
-        let fake = dir.join(name);
-        std::fs::write(&fake, "#!/bin/sh\nexit 0\n").unwrap();
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    // The manual layout offers every disk the scan read, and picking one of
+    // the others switches the plan to it. The other disk therefore carries a
+    // table too, or the switch would stop on a read the rig cannot make.
+    let other = dev.join("sdb");
+    std::fs::File::create(&other)
+        .and_then(|file| file.set_len(16 * 1024 * 1024 * 1024))
+        .unwrap();
+    let other_disk = other.to_string_lossy().to_string();
+    let mut child = std::process::Command::new("sfdisk")
+        .args(["-q", &other_disk])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("sfdisk from util-linux writes the fixture table");
+    {
+        use std::io::Write as _;
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"label: gpt\n")
+            .unwrap();
     }
+    assert!(child.wait().unwrap().success());
+    // The walk mounts what the disk holds read-only. The disk does not exist
+    // on this rig, so the fixture answers `mount` itself: it mounts nothing
+    // and writes onto the mount point the few files the walk reads, which is
+    // what lets the drawn table carry a detected system. A VM proof covers
+    // what the walk does with a real disk.
+    let fake_mount = dir.join("mount");
+    std::fs::write(
+        &fake_mount,
+        r#"#!/bin/sh
+# `mount_ro` passes the device third and the mount point last.
+case "$3" in
+/dev/vda1) mkdir -p "$4/EFI/fedora" ;;
+/dev/vda2)
+    mkdir -p "$4/etc"
+    printf 'PRETTY_NAME="Test OS"\n' > "$4/etc/os-release"
+    ;;
+esac
+exit 0
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake_mount, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let fake_umount = dir.join("umount");
+    std::fs::write(&fake_umount, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&fake_umount, std::fs::Permissions::from_mode(0o755)).unwrap();
     // The encryption row reads the container's header with `luksDump`, which
     // never opens the container. The rig has no `/dev/vda3`, so without this
     // fixture the row would draw what the host's `cryptsetup` says about an
@@ -348,6 +410,21 @@ esac
     )
     .unwrap();
     std::fs::set_permissions(&cryptsetup, std::fs::Permissions::from_mode(0o755)).unwrap();
+    // The manual table asks the image which entry directories its staged EFI
+    // payloads carry, so the picture draws what replaces the entries it
+    // removes. The rig has no payload image, so the fixture answers the list.
+    let podman = dir.join("podman");
+    std::fs::write(
+        &podman,
+        r#"#!/bin/sh
+case "$*" in
+*"/usr/lib/efi"*) printf '%s\n' /usr/lib/efi/grub2/1/EFI/fedora /usr/lib/efi/shim/1/EFI/BOOT ;;
+*) exit 1 ;;
+esac
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&podman, std::fs::Permissions::from_mode(0o755)).unwrap();
     // The panel states the firmware of the machine running it. That machine
     // may be UEFI or BIOS, and no two agree on their variables, so the golden
     // brings its own efivars.
@@ -397,7 +474,9 @@ esac
             b"\r",
             b"\x1b[A", b"\x1b[A", b"\x1b[A", b"\x1b[A", b"\x1b[A", b"\x1b[A", b"\x1b[A",
             b"\x1b[A",
-            b"\x1b[B", // to the empty username
+            // The hostname starts blank by the owner's decision 2026-09-24,
+            // so the walk supplies one before the username.
+            b"deb2\r",
             b"tect\r",
             b"hunter2\r",
             b"hunter2\r",
@@ -415,8 +494,10 @@ esac
             b"", // settle
             // Taking the separate-home answer redraws the partition table
             // with a home row. The size it then asks for takes digits only,
-            // and the screen draws the unit beside them.
-            b"\x1b[A", // to the home row
+            // and the screen draws the unit beside them. The form stays in the
+            // table after the answer, so the walk leaves it first.
+            b"\x1b[A", // the disk above the chosen one
+            b"\x1b[A", // out of the table, to the home row
             b"\r", // its list opens on the same-partition answer
             b"\x1b[B", // to Separate Home partition
             b"\r", // takes Separate Home and redraws the table
@@ -449,24 +530,26 @@ esac
             b"\x1b[B", // to manual
             b"\r", // takes the manual layout
             b"\x1b[B", // to the table
-            b"\r", // table mode
+            b"\r", // table mode, which opens on the first disk
+            b"\r", // a manual pick of another disk, which asks nothing
+            b"\x1b[B", // to the chosen disk
+            b"\r", // a manual pick of the chosen disk, asking nothing
             b"\x1b[B", // the first partition
             b"\r", // Assign opens
             b"\r", // its list
             b"\x1b[B", // the mount point
             b"\r", // take /boot/efi
-            b"\r", // table mode
             b"\x1b[B", // the second partition
             b"\r", // Assign opens
             b"\r", // its list
             b"\x1b[B", // the mount point
             b"\r", // take /
-            b"\r", // table mode
             b"\r", // the row menu
             b"\x1b[B", // Format
             b"\r", // the format window
             b"\r", // take ext4
-            b"\x1b[B", // to the actions
+            b"\x1b[B", // the container partition below
+            b"\x1b[B", // out of the table, to the actions
             b"\x1b[C", // Switch to shell
             b"\r", // its screen
             b"\x1b", // Go back, which opens on the table again
@@ -493,7 +576,7 @@ esac
     // stopped drawing the panel loses these words from the transcript.
     for phrase in [
         "OS Image",
-        "Detected System Firmware",
+        installer::copy::PANEL_FIRMWARE,
         "bootloader",
         // The fixture firmware is in setup mode, so the secure-boot row
         // states the condition key enrolment needs rather than a plain off.
@@ -506,7 +589,7 @@ esac
     // Taking the dim `Install` drew the missing answers, under the blank row
     // the screen sets them apart with.
     assert!(
-        transcript.contains("Missing: installation disk, username, password"),
+        transcript.contains("Missing: hostname, installation disk, username, password"),
         "{transcript}"
     );
     // `Install` was reachable. A green golden cannot show that on its own,
@@ -560,12 +643,13 @@ esac
         "format",
         "/boot/efi",
         "ext4",
-        // The container's row is drawn closed. At the golden's 80 columns
-        // the first table column is too narrow for the whole cell, so only
-        // its head is on the screen. The common crate's
-        // `a_table_with_long_node_names_still_draws_its_last_columns` pins
-        // the columns themselves.
-        "luks (c",
+        // The automatic plan's type column names what the cut writes. The
+        // manual rows' fixture carries no GPT type, so `linux` can only come
+        // from the plan.
+        "linux",
+        // The container's row is drawn closed, in the filesystem column the
+        // owner's fixed widths sized for exactly this word.
+        "luks(closed)",
         // Only a `Format` answer draws the tick on the root. The fixture's
         // `lsblk` already says `ext4`, so the filesystem cell alone would not
         // prove the walk's Format ran.
@@ -583,6 +667,15 @@ esac
         "20.0 GB",
         "\u{2514}\u{2500} size",
     ] {
+        assert!(
+            transcript.contains(phrase),
+            "{phrase} is not drawn: {transcript}"
+        );
+    }
+    // The systems the walk found draw as children of the partitions that
+    // carry them. The ESP's `EFI/fedora` directory and the old root's own
+    // `os-release` are the two sources the fixture writes.
+    for phrase in ["fedora", "Test OS"] {
         assert!(
             transcript.contains(phrase),
             "{phrase} is not drawn: {transcript}"

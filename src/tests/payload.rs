@@ -125,6 +125,47 @@ fn the_root_reserve_is_twice_the_image_plus_slack() {
     assert_eq!(root_reserve(&Some(20)), 42);
 }
 
+/// The probe script's status says the listing ran. A `[ -d ]` that is false
+/// on the last pattern otherwise reports a successful listing as a failure,
+/// and the picture loses the entries the image writes. Both roots are given
+/// a scratch tree, so the unmatched glob is forced on every host.
+#[test]
+fn the_image_probe_reports_a_listing_that_ran() {
+    let probe = |payload: &Path, boot: &Path| {
+        std::process::Command::new("sh")
+            .args([
+                "-c",
+                payload::ESP_LIST,
+                "probe",
+                &payload.to_string_lossy(),
+                &boot.to_string_lossy(),
+            ])
+            .output()
+            .expect("a shell to run the probe")
+    };
+    let root = scratch("probe-list");
+    std::fs::create_dir_all(root.join("usr/lib/efi/grub2/1/EFI/fedora")).expect("an entry");
+    let out = probe(&root.join("usr/lib/efi"), &root.join("boot/EFI"));
+    assert!(out.status.success(), "the probe exits {}", out.status);
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        root.join("usr/lib/efi/grub2/1/EFI/fedora")
+            .to_string_lossy()
+    );
+    // A root carrying no entry reports success and prints nothing. The old
+    // `&&` form reported the last unmatched glob as a failed listing.
+    let empty = scratch("probe-empty");
+    let out = probe(&empty.join("usr/lib/efi"), &empty.join("boot/EFI"));
+    assert!(out.status.success(), "the probe exits {}", out.status);
+    assert!(
+        out.stdout.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&empty);
+}
+
 /// `labelled` keeps every device the scan named, because `root` refuses a
 /// second labelled partition rather than picking one.
 #[test]
