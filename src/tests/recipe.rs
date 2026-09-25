@@ -73,24 +73,36 @@ fn the_assign_list_follows_the_filesystem() {
         parttype: String::new(),
         uuid: String::new(),
     };
-    assert_eq!(assigns(&partition("vfat"), None, true), ["/boot/efi"]);
     assert_eq!(
-        assigns(&partition("ext4"), None, true),
+        assigns(&partition("vfat"), None, true, false),
+        ["/boot/efi"]
+    );
+    assert_eq!(
+        assigns(&partition("ext4"), None, true, false),
         ["/", "/boot", "/var", "/var/home"]
     );
     // A systemd-boot target reads its kernel from the ESP, so a separate
     // `/boot` is no answer it can use.
     assert_eq!(
-        assigns(&partition("ext4"), None, false),
+        assigns(&partition("ext4"), None, false, false),
         ["/", "/var", "/var/home"]
     );
-    assert_eq!(assigns(&partition("swap"), None, true), ["/swap"]);
-    assert!(assigns(&partition(""), None, true).is_empty());
+    assert_eq!(assigns(&partition("swap"), None, true, false), ["/swap"]);
+    assert!(assigns(&partition(""), None, true, false).is_empty());
+    // A composefs target binds `/var` from the root, so `/var` itself is no
+    // answer there; a point under it still mounts.
+    assert_eq!(
+        assigns(&partition("ext4"), None, true, true),
+        ["/", "/boot", "/var/home"]
+    );
     let chosen = Mounted {
         target: String::new(),
         fstype: "fat32".to_string(),
     };
-    assert_eq!(assigns(&partition(""), Some(&chosen), true), ["/boot/efi"]);
+    assert_eq!(
+        assigns(&partition(""), Some(&chosen), true, false),
+        ["/boot/efi"]
+    );
 }
 
 /// A `stage` that stops returning a guard leaves the staged recipe in

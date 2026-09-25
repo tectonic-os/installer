@@ -492,22 +492,11 @@ esac
             b"", // settle
             b"\r", // Use this disk
             b"", // settle
-            // Taking the separate-home answer redraws the partition table
-            // with a home row. The size it then asks for takes digits only,
-            // and the screen draws the unit beside them. The form stays in the
-            // table after the answer, so the walk leaves it first.
+            // A composefs target hides the separate-home answer, so the home
+            // row keeps the system and the home together and asks no size.
+            // The walk leaves the table and walks up to the encryption row.
             b"\x1b[A", // the disk above the chosen one
             b"\x1b[A", // out of the table, to the home row
-            b"\r", // its list opens on the same-partition answer
-            b"\x1b[B", // to Separate Home partition
-            b"\r", // takes Separate Home and redraws the table
-            b"\x1b[B", // to the size, now shown
-            b"20\r", // the home size, which redraws the sized home row
-            b"\x1b[B", // to the table
-            b"\x1b[B", // to the actions, with the whole form in view
-            b"\x1b[A", // to the table
-            b"\x1b[A", // to the size
-            b"\x1b[A", // to the home row
             b"\x1b[A", // to the encryption row
             // The encryption type is a radio group. Taking `none` owes no
             // passphrase, so the window closes on the answer.
@@ -660,18 +649,18 @@ esac
         // 64.4 GB.
         "68.7 GB",
         "64.4 GB",
-        // The home answer redrew the table with a home row whose mount column
-        // names where it goes. The size is drawn as a `└─` child of that
-        // home row, with the unit beside it.
-        "/var/home",
-        "20.0 GB",
-        "\u{2514}\u{2500} size",
     ] {
         assert!(
             transcript.contains(phrase),
             "{phrase} is not drawn: {transcript}"
         );
     }
+    // A composefs target cannot mount a separate `/var`, so the home row
+    // offers one answer and the size question is never drawn.
+    assert!(
+        !transcript.contains(installer::copy::DATA_SEPARATE),
+        "the hidden separate-home answer is drawn: {transcript}"
+    );
     // The systems the walk found draw as children of the partitions that
     // carry them. The ESP's `EFI/fedora` directory and the old root's own
     // `os-release` are the two sources the fixture writes.

@@ -827,7 +827,7 @@ impl Answers {
             // No flag names the home row, so it opens unanswered. Answering it
             // rebuilds the disk table, which draws the home partition this row
             // decides.
-            Field::pick_change(copy::ROW_DATA, data_rows(), Some(0)),
+            Field::pick_change(copy::ROW_DATA, data_rows(payload.composefs), Some(0)),
             Field::measure(
                 &format!("\u{2514}\u{2500} {}", copy::ROW_SIZE),
                 &self.data.size,

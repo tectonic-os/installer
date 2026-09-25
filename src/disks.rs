@@ -376,11 +376,17 @@ pub(crate) fn slots_from(raw: &str) -> Result<Slots, String> {
 
 /// Builds what the `home and data` row offers. One answer keeps the system
 /// and the home on one partition. The other cuts a home partition of its own
-/// out of the install disk.
-pub(crate) fn data_rows() -> Vec<Choice> {
+/// out of the install disk, and that partition is `/var` itself. A composefs
+/// target binds `/var` from the root before any fstab unit runs, so the
+/// separate answer is hidden there rather than offered and never mounted.
+pub(crate) fn data_rows(composefs: bool) -> Vec<Choice> {
+    let separate = Choice::new(copy::DATA_SEPARATE, "");
     vec![
         Choice::new(copy::DATA_TOGETHER, ""),
-        Choice::new(copy::DATA_SEPARATE, ""),
+        match composefs {
+            true => separate.hidden(),
+            false => separate,
+        },
     ]
 }
 

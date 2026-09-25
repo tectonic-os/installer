@@ -60,16 +60,20 @@ pub(crate) fn fits(target: &str, fstype: &str) -> bool {
 
 /// Lists the mount points one partition can take. A partition is never
 /// offered a mount point its filesystem cannot carry. `boot` allows a separate
-/// `/boot`, which is an answer only where the target's bootloader can read one.
+/// `/boot`, which is an answer only where the target's bootloader can read one,
+/// and `composefs` leaves `/var` out because bootc binds it before any fstab
+/// unit runs. A point under `/var` still mounts.
 pub(crate) fn assigns(
     partition: &Partition,
     answer: Option<&Mounted>,
     boot: bool,
+    composefs: bool,
 ) -> Vec<&'static str> {
     let holds = effective_fs(partition, answer);
     copy::mount_points()
         .into_iter()
         .filter(|target| *target != "/boot" || boot)
+        .filter(|target| *target != "/var" || !composefs)
         .filter(|target| fits(target, &holds))
         .collect()
 }
@@ -77,9 +81,13 @@ pub(crate) fn assigns(
 /// Lists the mount points an open container takes. A closed container is
 /// offered none, because what is inside stays unknown until the user gives
 /// the key. `/boot/efi` stays out, because the firmware reads the ESP before
-/// anything opens the container.
-pub(crate) fn open_points() -> [&'static str; 3] {
+/// anything opens the container, and `composefs` leaves `/var` out as
+/// `assigns` does.
+pub(crate) fn open_points(composefs: bool) -> Vec<&'static str> {
     ["/", "/var", "/var/home"]
+        .into_iter()
+        .filter(|target| *target != "/var" || !composefs)
+        .collect()
 }
 
 /// Builds the Assign submenu from the mount points a partition can take.
@@ -408,7 +416,7 @@ pub(crate) fn layout_table(
                             false => "\u{251c}\u{2500} ",
                         };
                         let device = devices.get(at).cloned().unwrap_or_default();
-                        let (menus, actions) = created_menu(create, boot);
+                        let (menus, actions) = created_menu(create, boot, payload.composefs);
                         table.push(
                             created_cells(create, &device, branch),
                             true,
@@ -459,7 +467,7 @@ fn partition_rows(
         let renamed = held.and_then(|held| held.renamed(&partition.device));
         let cells = partition_cells(partition, answer, branch, deleted, renamed);
         let (menus, actions) = match held {
-            Some(held) => partition_menu(partition, Some(held), boot),
+            Some(held) => partition_menu(partition, Some(held), boot, payload.composefs),
             None => (Vec::new(), Vec::new()),
         };
         table.push(cells, chosen, menus, actions, RowKind::Part { index: at });
@@ -751,12 +759,13 @@ fn partition_cells(
 }
 
 /// Builds one existing partition's popup and the action each item answers
-/// with. Building the popup writes nothing to the disk. `boot` allows the
-/// `/boot` mount point, as `assigns` does.
+/// with. Building the popup writes nothing to the disk. `boot` and `composefs`
+/// shape the Assign list as `assigns` does.
 pub(crate) fn partition_menu(
     partition: &Partition,
     held: Option<&CustomLayout>,
     boot: bool,
+    composefs: bool,
 ) -> (Vec<common::ui::MenuItem>, Vec<PartAction>) {
     // A partition the plan will remove offers `Reset` alone. Nothing can be
     // mounted, formatted or opened on a partition that will not be there, and
@@ -787,7 +796,7 @@ pub(crate) fn partition_menu(
     };
     if container {
         if opened {
-            let points = assign_children(&open_points());
+            let points = assign_children(&open_points(composefs));
             items.push(common::ui::MenuItem::under(copy::ASSIGN, &points));
             actions.push(PartAction::Assign);
         }
@@ -804,7 +813,7 @@ pub(crate) fn partition_menu(
             }
         }
     } else {
-        let points = assigns(partition, answer.as_ref(), boot);
+        let points = assigns(partition, answer.as_ref(), boot, composefs);
         if !points.is_empty() {
             let points = assign_children(&points);
             items.push(common::ui::MenuItem::under(copy::ASSIGN, &points));
@@ -829,8 +838,12 @@ pub(crate) fn partition_menu(
 
 /// Builds one planned partition's popup. A partition cut blank has nothing to
 /// keep and no container to open, so the popup formats it, assigns it or
-/// drops it. `boot` allows the `/boot` mount point, as `assigns` does.
-fn created_menu(create: &Created, boot: bool) -> (Vec<common::ui::MenuItem>, Vec<PartAction>) {
+/// drops it. `boot` and `composefs` shape the Assign list as `assigns` does.
+pub(crate) fn created_menu(
+    create: &Created,
+    boot: bool,
+    composefs: bool,
+) -> (Vec<common::ui::MenuItem>, Vec<PartAction>) {
     let points: Vec<&'static str> = copy::mount_points()
         .into_iter()
         // `collect` formats a create from `plain_formats`, which carries no
@@ -838,6 +851,7 @@ fn created_menu(create: &Created, boot: bool) -> (Vec<common::ui::MenuItem>, Vec
         // leaves it out.
         .filter(|target| *target != "/swap")
         .filter(|target| *target != "/boot" || boot)
+        .filter(|target| *target != "/var" || !composefs)
         .filter(|target| create.fstype.is_empty() || fits(target, &create.fstype))
         .collect();
     let mut items = Vec::new();

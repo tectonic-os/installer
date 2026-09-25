@@ -16,7 +16,7 @@ fn a_planned_removal_offers_only_the_answer_that_undoes_it() {
     };
     let mut layout = CustomLayout::empty("/dev/vda");
     for partition in [&plain, &container] {
-        let (items, actions) = super::partition_menu(partition, Some(&layout), true);
+        let (items, actions) = super::partition_menu(partition, Some(&layout), true, false);
         assert!(
             items.iter().any(|item| item.label == copy::DELETE_PART),
             "{:?}",
@@ -25,17 +25,90 @@ fn a_planned_removal_offers_only_the_answer_that_undoes_it() {
         assert!(matches!(actions.last(), Some(PartAction::Delete)));
     }
     layout.deletes = vec!["/dev/vda1".to_string()];
-    let (items, actions) = super::partition_menu(&plain, Some(&layout), true);
+    let (items, actions) = super::partition_menu(&plain, Some(&layout), true, false);
     assert_eq!(items.len(), 1);
     assert_eq!(items[0].label, copy::RESET_CHANGES);
     assert!(matches!(actions[0], PartAction::Reset));
     // The partition beside the removed one keeps its own popup.
     assert!(
-        super::partition_menu(&container, Some(&layout), true)
+        super::partition_menu(&container, Some(&layout), true, false)
             .0
             .len()
             > 1
     );
+}
+
+/// A composefs target binds `/var` from the root before fstab units run, so
+/// no Assign list may offer `/var` itself. The points under it stay, because
+/// nothing binds them.
+#[test]
+fn a_composefs_target_offers_no_var_to_assign() {
+    let points = |menu: &[common::ui::MenuItem]| -> Vec<String> {
+        menu.iter()
+            .find(|item| item.label == copy::ASSIGN)
+            .map(|item| item.children.clone())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|child| child != copy::UNASSIGN)
+            .collect()
+    };
+    let opened = Partition {
+        device: "/dev/vda2".to_string(),
+        fstype: "crypto_LUKS".to_string(),
+        ..Default::default()
+    };
+    let mut layout = CustomLayout::empty("/dev/vda");
+    layout.opens.push(LuksOpen {
+        partition: opened.device.clone(),
+        target: "/var".to_string(),
+        key: Key::Passphrase("opensesame".to_string()),
+    });
+    let sealed = points(&super::partition_menu(&opened, Some(&layout), true, true).0);
+    assert!(!sealed.iter().any(|point| point == "/var"), "{sealed:?}");
+    assert!(
+        sealed.iter().any(|point| point == "/var/home"),
+        "{sealed:?}"
+    );
+    let plain = points(&super::partition_menu(&opened, Some(&layout), true, false).0);
+    assert!(plain.iter().any(|point| point == "/var"), "{plain:?}");
+
+    let create = Created {
+        gb: 20,
+        ..Default::default()
+    };
+    let sealed = points(&super::created_menu(&create, true, true).0);
+    assert!(!sealed.iter().any(|point| point == "/var"), "{sealed:?}");
+    assert!(
+        sealed.iter().any(|point| point == "/var/home"),
+        "{sealed:?}"
+    );
+    let plain = points(&super::created_menu(&create, true, false).0);
+    assert!(plain.iter().any(|point| point == "/var"), "{plain:?}");
+
+    // The drawn table wires the payload's sealing into every create it draws.
+    let mut sealed = a_payload();
+    sealed.composefs = true;
+    let held = CustomLayout {
+        disk: "/dev/vda".to_string(),
+        creates: vec![Created {
+            gb: 20,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let scan = scan_of(
+        &[("/dev/vda", "64G")],
+        &[("/dev/vda", vec![part("/dev/vda1", "vfat")])],
+    );
+    let table = layout_table(&scan, "/dev/vda", Some(&held), &sealed, "", false, false);
+    let at = table
+        .kinds
+        .iter()
+        .position(|kind| matches!(kind, RowKind::Created { .. }))
+        .expect("a created row");
+    let drawn = points(&table.menus[at]);
+    assert!(!drawn.iter().any(|point| point == "/var"), "{drawn:?}");
+    assert!(drawn.iter().any(|point| point == "/var/home"), "{drawn:?}");
 }
 
 /// A blank disk still offers `Create partition`. The user cuts partitions
@@ -774,7 +847,9 @@ fn root_encryption_is_refused_without_an_initramfs_witness() {
         Some(copy::NO_LUKS_INITRAMFS)
     );
 
-    assert_eq!(open_points(), ["/", "/var", "/var/home"]);
+    assert_eq!(open_points(false), ["/", "/var", "/var/home"]);
+    // A composefs target leaves `/var` itself out; the points under it stay.
+    assert_eq!(open_points(true), ["/", "/var/home"]);
 }
 
 /// A PIN kind owes fields 4 and 5 while it draws rows `[0, 1, 4, 5]`, so a

@@ -64,7 +64,7 @@ fn every_shown_description_is_written_as_the_name_fisherman_takes() {
 /// size, which is what tells the two apart.
 #[test]
 fn the_home_row_offers_together_or_a_partition_of_its_own() {
-    let rows = data_rows();
+    let rows = data_rows(false);
     let labels: Vec<&str> = rows.iter().map(|row| row.label.as_str()).collect();
     assert_eq!(labels, [copy::DATA_TOGETHER, copy::DATA_SEPARATE]);
     assert!(rows.iter().all(|row| row.available));
@@ -77,6 +77,13 @@ fn the_home_row_offers_together_or_a_partition_of_its_own() {
         }),
         copy::DATA_SEPARATE
     );
+    // A composefs target hides the separate answer rather than cutting a
+    // `/var` the boot never mounts.
+    let locked = data_rows(true);
+    assert_eq!(locked[0].label, copy::DATA_TOGETHER);
+    assert!(!locked[0].hidden);
+    assert_eq!(locked[1].label, copy::DATA_SEPARATE);
+    assert!(locked[1].hidden);
 }
 
 /// A separate home is written as fisherman's `varDisk` size. The size the
@@ -367,4 +374,40 @@ fn the_home_answer_reads_as_together_or_separate() {
     assert_eq!(data_said(&separate), copy::DATA_SEPARATE);
     // The separate answer keeps the size fisherman cuts the home to.
     assert_eq!(separate.size, "200 GB");
+}
+
+/// The installer hands the payload's sealing to the home row, so a composefs
+/// target hides the answer that cuts a `/var` its boot never mounts. A
+/// non-composefs payload still offers it.
+#[test]
+fn a_composefs_target_hides_the_separate_home_answer() {
+    let answers = Answers {
+        disk: "/dev/vda".to_string(),
+        hostname: "deb2".to_string(),
+        user: "tect".to_string(),
+        password: "hunter2".to_string(),
+        opened: Opened::Keep,
+        encryption: Encryption {
+            kind: NONE.to_string(),
+            passphrase: String::new(),
+            pin: String::new(),
+        },
+        data: Data::default(),
+        layout: None,
+    };
+    let separate_hidden = |composefs: bool| -> bool {
+        let mut payload = a_payload();
+        payload.composefs = composefs;
+        let fields = answers.fields(&payload, &Scan::default(), "/dev/vda", None, "");
+        let common::ui::Field::Pick { options, .. } = &fields[ROW_DATA] else {
+            panic!("the home row is a pick");
+        };
+        options
+            .iter()
+            .find(|choice| choice.label == copy::DATA_SEPARATE)
+            .expect("the separate answer keeps its index")
+            .hidden
+    };
+    assert!(separate_hidden(true));
+    assert!(!separate_hidden(false));
 }
