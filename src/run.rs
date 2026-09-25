@@ -219,35 +219,50 @@ pub(crate) fn finish(
     // The whole key goes inside the box. A key held in no file and shown on
     // no screen leaves a disk the user cannot open.
     let mut offered = offered;
-    loop {
-        let rows = done_rows(recovery, log, steps, notes, volumes, &offered);
-        let mut actions = Vec::new();
-        match &offered {
-            Offered::Ready(_) => actions.push(Choice::new(copy::FINALIZE_AUTO, "")),
-            Offered::Unavailable(why) => {
-                actions.push(Choice::new(copy::FINALIZE_AUTO, why.clone()).unavailable())
-            }
-            Offered::None => actions.push(Choice::new(copy::RESTART, "")),
-        }
-        if !matches!(offered, Offered::None) {
-            actions.push(Choice::new(copy::FINALIZE_MANUAL, ""));
-        }
-        match common::ui::offer_over(copy::INSTALL_DONE, rows, &actions, copy::DONE_KEYS)? {
-            None => return Ok(()),
-            Some(at) => {
-                if let (0, Offered::Ready(ready)) = (at, &offered) {
-                    if let Err(why) = automatic::finalize(ready) {
-                        // The recovery key is on this screen and in no file,
-                        // so a failed finalize draws the screen again rather
-                        // than restarting past the key.
-                        eprintln!("{PROGRAM}: {why}");
-                        offered = Offered::Unavailable(copy::AUTO_FAILED.to_string());
-                        continue;
-                    }
+    choosing(
+        &mut offered,
+        |offered| {
+            let rows = done_rows(recovery, log, steps, notes, volumes, offered);
+            let mut actions = Vec::new();
+            match offered {
+                Offered::Ready(_) => actions.push(Choice::new(copy::FINALIZE_AUTO, "")),
+                Offered::Unavailable(why) => {
+                    actions.push(Choice::new(copy::FINALIZE_AUTO, why.clone()).unavailable())
                 }
-                return restart();
+                Offered::None => actions.push(Choice::new(copy::RESTART, "")),
+            }
+            if !matches!(offered, Offered::None) {
+                actions.push(Choice::new(copy::FINALIZE_MANUAL, ""));
+            }
+            common::ui::offer_over(copy::INSTALL_DONE, rows, &actions, copy::DONE_KEYS)
+        },
+        automatic::finalize,
+        restart,
+    )
+}
+
+/// Runs the completion screen until an action ends it. A failed automatic
+/// finalize draws the screen again with the reason, because the recovery key
+/// the screen shows is in no file and a restart would leave the disk
+/// unopenable.
+pub(crate) fn choosing(
+    offered: &mut Offered,
+    mut draw: impl FnMut(&Offered) -> Result<Option<usize>, String>,
+    mut finalize: impl FnMut(&Ready) -> Result<(), String>,
+    mut restart: impl FnMut() -> Result<(), String>,
+) -> Result<(), String> {
+    loop {
+        let Some(at) = draw(offered)? else {
+            return Ok(());
+        };
+        if let (0, Offered::Ready(ready)) = (at, &*offered) {
+            if let Err(why) = finalize(ready) {
+                eprintln!("{PROGRAM}: {why}");
+                *offered = Offered::Unavailable(copy::AUTO_FAILED.to_string());
+                continue;
             }
         }
+        return restart();
     }
 }
 

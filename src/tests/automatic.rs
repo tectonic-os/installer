@@ -101,6 +101,73 @@ fn a_layout_finalizes_only_an_opened_root() {
     assert!(unlocking_key(&held, None).is_none());
 }
 
+/// The credential has to land on the partition `systemd-stub` booted from.
+/// A partition whose filesystem carries neither the loader entries nor a UKI
+/// is one no initrd asks for the credential.
+#[test]
+fn only_a_partition_with_boot_files_carries_the_credential() {
+    let bare = scratch("automatic-bare");
+    assert!(!carries_boot_files(&bare));
+    let entries = scratch("automatic-entries");
+    std::fs::create_dir_all(entries.join("loader/entries")).unwrap();
+    assert!(carries_boot_files(&entries));
+    let uki = scratch("automatic-uki");
+    std::fs::create_dir_all(uki.join("EFI/Linux")).unwrap();
+    assert!(carries_boot_files(&uki));
+    let _ = std::fs::remove_dir_all(&bare);
+    let _ = std::fs::remove_dir_all(&entries);
+    let _ = std::fs::remove_dir_all(&uki);
+}
+
+/// A failed finalize names the one-time slot it could not remove. The reason
+/// is printed where the user can read it and names the slot to wipe by hand.
+#[test]
+fn a_failed_finalize_names_the_slot_it_left_behind() {
+    let why = "sealing the one-time key failed".to_string();
+    assert_eq!(discarded_message(3, why.clone(), Ok(())), why);
+    let left = discarded_message(3, why.clone(), Err("device is busy".to_string()));
+    assert!(left.starts_with(&why), "{left}");
+    assert!(left.contains("slot 3"), "{left}");
+    assert!(left.contains("device is busy"), "{left}");
+}
+
+/// The slot removal authenticates with the key that opens the container.
+/// `cryptsetup` reads the device before the slot number, so the two orders are
+/// not interchangeable.
+#[test]
+fn the_slot_removal_names_the_device_then_the_slot() {
+    let ready = Ready {
+        image: "example.invalid/image:1".to_string(),
+        disk: "/dev/vda".to_string(),
+        partition: "/dev/vda3".to_string(),
+        key: Key::Passphrase("recovery".to_string()),
+        pin: false,
+    };
+    let command = kill_slot_command(&ready, 7);
+    assert_eq!(command.get_program(), "cryptsetup");
+    let words: Vec<String> = command
+        .get_args()
+        .map(|word| word.to_string_lossy().to_string())
+        .collect();
+    assert_eq!(
+        words,
+        ["-q", "luksKillSlot", "--key-file", "-", "/dev/vda3", "7"]
+    );
+}
+
+/// The marker is written before the seal, so a seal that fails still leaves
+/// the first boot the slot number that has to be wiped. Without the marker the
+/// boot unit wipes no slot, removes no credential and shreds its own key.
+#[test]
+fn a_failed_seal_leaves_the_slot_marker_behind() {
+    let esp = scratch("automatic-marker");
+    let failed = credential_with(&esp, 7, |_| Err("the seal failed".to_string()));
+    assert_eq!(failed.unwrap_err(), "the seal failed");
+    let marker = esp.join(CREDENTIAL_DIR).join(SLOT_FILE);
+    assert_eq!(std::fs::read_to_string(&marker).expect("the marker"), "7\n");
+    let _ = std::fs::remove_dir_all(&esp);
+}
+
 /// The completion screen offers no automatic action until a first-boot
 /// enrolment is staged, and it names the missing stub before it spends a
 /// probe on the image.

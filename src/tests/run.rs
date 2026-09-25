@@ -42,6 +42,93 @@ fn the_last_screen_heads_the_key_and_the_steps() {
     );
 }
 
+/// Holds a finalize the completion loop can take, with the key the user typed
+/// kept out of every file.
+fn a_ready() -> Ready {
+    Ready {
+        image: "example.invalid/image:1".to_string(),
+        disk: "/dev/vda".to_string(),
+        partition: "/dev/vda2".to_string(),
+        key: Key::Passphrase("recovery".to_string()),
+        pin: false,
+    }
+}
+
+/// A failed finalize must leave the last screen up with the reason. The
+/// recovery key that screen shows is in no file, so a restart past it would
+/// leave the user with a disk they cannot open and a key they never read.
+#[test]
+fn a_failed_finalize_draws_the_screen_again_with_the_reason() {
+    let mut offered = Offered::Ready(a_ready());
+    let mut drawn = Vec::new();
+    let mut restarts = 0;
+    choosing(
+        &mut offered,
+        |offered| {
+            drawn.push(match offered {
+                Offered::Ready(_) => 0,
+                Offered::Unavailable(_) => 1,
+                Offered::None => 2,
+            });
+            Ok(Some(drawn.len() - 1))
+        },
+        |_| Err("the seal failed".to_string()),
+        || {
+            restarts += 1;
+            Ok(())
+        },
+    )
+    .expect("the manual action ends the loop");
+    assert_eq!(drawn, [0, 1], "the screen is drawn again after the failure");
+    assert_eq!(restarts, 1);
+    match &offered {
+        Offered::Unavailable(why) => assert_eq!(why, copy::AUTO_FAILED),
+        _ => panic!("a failed finalize must leave the automatic action unavailable"),
+    }
+}
+
+/// A successful finalize restarts at once, so no action can be taken between
+/// the credential write and the boot that reads it.
+#[test]
+fn a_successful_finalize_restarts_at_once() {
+    let mut offered = Offered::Ready(a_ready());
+    let mut drawn = 0;
+    let mut finalized = 0;
+    let mut restarts = 0;
+    choosing(
+        &mut offered,
+        |_| {
+            drawn += 1;
+            Ok(Some(0))
+        },
+        |_| {
+            finalized += 1;
+            Ok(())
+        },
+        || {
+            restarts += 1;
+            Ok(())
+        },
+    )
+    .expect("the restart ends the loop");
+    assert_eq!((drawn, finalized, restarts), (1, 1, 1));
+}
+
+/// Esc on the last screen ends the run without a finalize and without a
+/// restart, so the user keeps the machine as the install left it.
+#[test]
+fn esc_ends_the_last_screen_without_restarting() {
+    let mut offered = Offered::Ready(a_ready());
+    choosing(
+        &mut offered,
+        |_| Ok(None),
+        |_| panic!("no action was taken"),
+        || panic!("nothing asked for a restart"),
+    )
+    .expect("esc is an ending");
+    assert!(matches!(offered, Offered::Ready(_)));
+}
+
 /// A staged enrolment draws what each action does directly above the actions,
 /// wrapped to the rows, and the automatic action's window draws in the
 /// warning colour. The manual restart alone draws neither.

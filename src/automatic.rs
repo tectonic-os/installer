@@ -218,20 +218,39 @@ fn require_credential_tool(image: &str) -> Result<(), String> {
 /// removal fails too. A failed finalize must not leave a slot whose key
 /// reached no file.
 fn discarded(ready: &Ready, slot: u32, why: String) -> String {
-    match kill_slot(ready, slot) {
+    discarded_message(slot, why, kill_slot(ready, slot))
+}
+
+/// States what a failed finalize left behind. The one-time slot has to be
+/// named when its removal also fails, so the user knows which slot to wipe.
+pub(crate) fn discarded_message(slot: u32, why: String, cleanup: Result<(), String>) -> String {
+    match cleanup {
         Ok(()) => why,
         Err(cleanup) => format!("{why}; and slot {slot} was left behind: {cleanup}"),
     }
 }
 
-/// Removes one keyslot, authenticated with the key that opens the container.
-fn kill_slot(ready: &Ready, slot: u32) -> Result<(), String> {
+/// Builds the removal of one keyslot, authenticated with the key that opens
+/// the container.
+pub(crate) fn kill_slot_command(ready: &Ready, slot: u32) -> Command {
     let mut command = Command::new("cryptsetup");
     command.args(["-q", "luksKillSlot"]);
     command.args(auth_args(&ready.key));
     command.arg(&ready.partition).arg(slot.to_string());
-    run_with_key(command, &ready.key, "removes a key")
+    command
+}
+
+/// Removes one keyslot, authenticated with the key that opens the container.
+fn kill_slot(ready: &Ready, slot: u32) -> Result<(), String> {
+    run_with_key(kill_slot_command(ready, slot), &ready.key, "removes a key")
         .map_err(|why| format!("removing slot {slot} from {}: {why}", ready.partition))
+}
+
+/// Reports whether a mounted partition holds the boot files `systemd-stub`
+/// reads. A credential on a partition the stub did not load from never
+/// reaches the initrd.
+pub(crate) fn carries_boot_files(at: &Path) -> bool {
+    at.join("loader/entries").is_dir() || at.join("EFI/Linux").is_dir()
 }
 
 /// Mounts the ESP carrying the installed boot files and runs `write` over its
@@ -247,7 +266,7 @@ fn with_esp<T>(disk: &str, write: impl FnOnce(&Path) -> Result<T, String>) -> Re
         let Ok(at) = mount_rw(&device, &mut mounts) else {
             continue;
         };
-        if !at.join("loader/entries").is_dir() && !at.join("EFI/Linux").is_dir() {
+        if !carries_boot_files(&at) {
             mounts.release(&at)?;
             continue;
         }
@@ -272,11 +291,27 @@ fn with_esp<T>(disk: &str, write: impl FnOnce(&Path) -> Result<T, String>) -> Re
 /// marker is written first, so a sealing failure still leaves the first boot
 /// the slot number that has to go.
 fn credential(image: &str, esp: &Path, key: &[u8], slot: u32) -> Result<(), String> {
+    credential_with(esp, slot, |_| seal(image, esp, key))
+}
+
+/// Takes the seal as a parameter, so a test can fail it without a TPM and
+/// read the marker back.
+pub(crate) fn credential_with(
+    esp: &Path,
+    slot: u32,
+    seal: impl FnOnce(&Path) -> Result<(), String>,
+) -> Result<(), String> {
     let at = esp.join(CREDENTIAL_DIR);
     std::fs::create_dir_all(&at).map_err(|err| format!("{}: {err}", at.display()))?;
     let marker = at.join(SLOT_FILE);
     std::fs::write(&marker, format!("{slot}\n"))
         .map_err(|err| format!("{}: {err}", marker.display()))?;
+    seal(esp)
+}
+
+/// Seals the one-time key into the credential the initrd asks for, with the
+/// image's own `systemd-creds` and the TPM.
+fn seal(image: &str, esp: &Path, key: &[u8]) -> Result<(), String> {
     let staged = staged_key(key)?;
     let key_mount = format!("{}:/run/one-time-key:ro", staged.0.display());
     let esp_mount = format!("{}:/esp", esp.display());
