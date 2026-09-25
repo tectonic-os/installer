@@ -2,6 +2,7 @@ pub(crate) use super::*;
 use std::io::Write as _;
 
 mod answers;
+mod automatic;
 mod backend;
 mod boot;
 mod discover;

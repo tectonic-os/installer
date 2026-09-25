@@ -6,7 +6,7 @@ use std::io::{Read as _, Write as _};
 const ROOT_MOUNT: &str = "/run/tect-root";
 
 /// Use this x86-64 root partition type when the custom-layout path lacks one.
-const ROOT_GUID: &str = "4f68bce3-e8cd-4db1-96e7-fbcaf984b709";
+pub(crate) const ROOT_GUID: &str = "4f68bce3-e8cd-4db1-96e7-fbcaf984b709";
 
 /// One file `write_etc` writes under the installed system's own `/etc`. A key
 /// file takes mode 0600 and a systemd unit takes 0644.
@@ -129,7 +129,7 @@ fn data_volume(
         (Key::Passphrase(_), Opened::AddKey) => {
             let before = slots(&open.partition)?.keys;
             let key = random_key()?;
-            add_key(open, &key)?;
+            add_key(open, &key, free_slot(&before)?)?;
             if !test_key(&open.partition, &key)? {
                 return Err(copy::added_key_wrong(&open.partition));
             }
@@ -382,9 +382,72 @@ fn luks_uuid(partition: &str) -> Result<String, String> {
 }
 
 /// One key added to a container, authenticated with the key that already
-/// opens it. The new key is passed in a file only `cryptsetup` reads.
-/// `data_volume` tests the new key before it treats the addition as done.
-fn add_key(open: &LuksOpen, key: &[u8]) -> Result<(), String> {
+/// opens it. The new key is passed in a file only `cryptsetup` reads, and the
+/// slot is explicit, so a caller can name the key it added. `data_volume`
+/// tests the new key before it treats the addition as done.
+pub(crate) fn add_key(open: &LuksOpen, key: &[u8], slot: u32) -> Result<(), String> {
+    let at = staged_key(key)?;
+    let mut command = Command::new("cryptsetup");
+    command.args(["-q", "luksAddKey"]);
+    command.arg(format!("--key-slot={slot}"));
+    command.args(auth_args(&open.key));
+    command.arg(&open.partition).arg(&at.0);
+    run_with_key(command, &open.key, "adds a key")
+        .map_err(|why| format!("adding a key to {}: {why}", open.partition))
+}
+
+/// Names the first key slot a container can take. LUKS2 stops at slot 31, and
+/// an explicit slot is what lets a caller name the key it added even when the
+/// header cannot be read back.
+pub(crate) fn free_slot(keys: &[u32]) -> Result<u32, String> {
+    const SLOTS: u32 = 32;
+    (0..SLOTS)
+        .find(|at| !keys.contains(at))
+        .ok_or_else(|| format!("all {SLOTS} key slots are in use"))
+}
+
+/// Builds `cryptsetup`'s arguments that authenticate one header operation.
+/// A passphrase and a data volume's key both arrive on stdin, so neither
+/// reaches the process list. A key file is named by its path, which
+/// `cryptsetup` reads itself.
+pub(crate) fn auth_args(key: &Key) -> Vec<std::ffi::OsString> {
+    match key {
+        Key::File(path) => vec!["--key-file".into(), path.as_os_str().to_os_string()],
+        _ => vec!["--key-file".into(), "-".into()],
+    }
+}
+
+/// Runs a `cryptsetup` command that authenticates with `key`. The calling
+/// command has already built the argument vector, and `what` completes the
+/// sentence a spawn failure prints.
+pub(crate) fn run_with_key(mut command: Command, key: &Key, what: &str) -> Result<(), String> {
+    command.stdout(Stdio::null()).stderr(Stdio::piped());
+    if key.bytes().is_some() {
+        command.stdin(Stdio::piped());
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|err| format!("cryptsetup: {err}, and it is what {what}"))?;
+    if let Some(bytes) = key.bytes() {
+        child
+            .stdin
+            .take()
+            .ok_or("cryptsetup: no stdin")?
+            .write_all(bytes)
+            .map_err(|err| format!("cryptsetup: {err}"))?;
+    }
+    let out = child
+        .wait_with_output()
+        .map_err(|err| format!("cryptsetup: {err}"))?;
+    match out.status.success() {
+        true => Ok(()),
+        false => Err(String::from_utf8_lossy(&out.stderr).trim().to_string()),
+    }
+}
+
+/// Writes one key to a file only its reader can open. A secret that reaches
+/// the disk must live under a path the process owns and removes.
+pub(crate) fn staged_key(key: &[u8]) -> Result<Staged, String> {
     use std::os::unix::fs::OpenOptionsExt as _;
     // `create_new` fails if the path already exists, and `mode` applies from
     // the file's first instant, so no other user can read the key at any
@@ -412,52 +475,13 @@ fn add_key(open: &LuksOpen, key: &[u8]) -> Result<(), String> {
     file.write_all(key)
         .map_err(|err| format!("{}: {err}", at.0.display()))?;
     drop(file);
-    let mut command = Command::new("cryptsetup");
-    command.args(["-q", "luksAddKey"]);
-    match &open.key {
-        Key::File(path) => {
-            command.arg("--key-file").arg(path);
-        }
-        _ => {
-            command.args(["--key-file", "-"]);
-        }
-    }
-    command.arg(&open.partition).arg(&at.0);
-    command.stdout(Stdio::null()).stderr(Stdio::piped());
-    if open.key.bytes().is_some() {
-        command.stdin(Stdio::piped());
-    }
-    let added = (|| {
-        let mut child = command
-            .spawn()
-            .map_err(|err| format!("cryptsetup: {err}, and it is what adds a key"))?;
-        if let Some(bytes) = open.key.bytes() {
-            child
-                .stdin
-                .take()
-                .ok_or("cryptsetup: no stdin")?
-                .write_all(bytes)
-                .map_err(|err| format!("cryptsetup: {err}"))?;
-        }
-        let out = child
-            .wait_with_output()
-            .map_err(|err| format!("cryptsetup: {err}"))?;
-        match out.status.success() {
-            true => Ok(()),
-            false => Err(format!(
-                "adding a key to {}: {}",
-                open.partition,
-                String::from_utf8_lossy(&out.stderr).trim()
-            )),
-        }
-    })();
-    added
+    Ok(at)
 }
 
 /// A new key that opens a container with no user present. The key is 32
 /// random bytes written as hex, read from the kernel and taken from no
 /// dependency.
-fn random_key() -> Result<Vec<u8>, String> {
+pub(crate) fn random_key() -> Result<Vec<u8>, String> {
     let mut bytes = [0u8; 32];
     std::fs::File::open("/dev/urandom")
         .and_then(|mut source| source.read_exact(&mut bytes))

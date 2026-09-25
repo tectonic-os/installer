@@ -19,6 +19,7 @@ pub(crate) use std::path::{Path, PathBuf};
 pub(crate) use std::process::{Command, Stdio};
 
 mod answers;
+mod automatic;
 mod backend;
 mod boot;
 mod collect;
@@ -39,6 +40,7 @@ mod table;
 mod volumes;
 
 pub use answers::*;
+pub(crate) use automatic::*;
 pub(crate) use backend::*;
 pub(crate) use boot::*;
 pub(crate) use discover::*;

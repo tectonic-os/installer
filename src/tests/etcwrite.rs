@@ -73,6 +73,27 @@ fn the_root_device_is_where_the_layout_put_it() {
     assert_eq!(root_device(&mounted).as_deref(), Some("/dev/vda2"));
 }
 
+/// The authenticating key keeps its form: a passphrase travels on stdin and
+/// never reaches the process list, and a key file is passed by path.
+#[test]
+fn the_authenticating_key_keeps_its_form() {
+    let words = |key: &Key| -> Vec<String> {
+        auth_args(key)
+            .iter()
+            .map(|word| word.to_string_lossy().to_string())
+            .collect()
+    };
+    assert_eq!(
+        words(&Key::File(PathBuf::from("/run/key"))),
+        ["--key-file", "/run/key"]
+    );
+    assert_eq!(
+        words(&Key::Passphrase("opensesame".to_string())),
+        ["--key-file", "-"]
+    );
+    assert_eq!(words(&Key::Data(vec![1, 2, 3])), ["--key-file", "-"]);
+}
+
 /// `retag_root` hands this number to `sfdisk --part-type`, so a device with
 /// no trailing digits is refused instead of retagging another partition.
 #[test]

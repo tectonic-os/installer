@@ -13,7 +13,7 @@ path = "src/main.rs"
 libc = "0.2"
 # Pinned by rev, never by version. A change in `common` is a commit there and
 # a bump here, which keeps the rev that was built with visible in `Cargo.lock`.
-common = { git = "https://github.com/tectonic-os/common", rev = "fd400a1fae25c2973c880c1274f37703806aa1b4" }
+common = { git = "https://github.com/tectonic-os/common", rev = "4768623137f4901eb94c2284357d9123af0726bb" }
 
 [profile.release]
 opt-level = 1

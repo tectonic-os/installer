@@ -150,12 +150,19 @@ pub fn run(payload: &Payload, answers: &mut Answers, prompt: &Prompt) -> Result<
         true => recovery_volumes(answers),
         false => Vec::new(),
     };
+    let offered = match prompt.draws() {
+        true => automatic::offered(payload, answers, recovery.as_deref()),
+        // A run that draws nothing cannot offer the action, and the probe
+        // into the image would cost an answer no one reads.
+        false => Offered::None,
+    };
     finish(
         recovery.as_deref(),
         at.as_deref(),
         steps,
         &notes,
         &volumes,
+        offered,
         prompt,
     )
 }
@@ -177,15 +184,18 @@ fn recovery_volumes(answers: &Answers) -> Vec<String> {
 /// Draws the last screen. It carries the recovery key, which is on screen
 /// because it is deliberately in no file. It carries the steps the firmware
 /// still asks for. It offers the restart, because the stick is still in the
-/// machine and no other screen says what to do next. `notes` states what
-/// arranging the opened containers owes about slots, which this says rather
-/// than does. `volumes` names what the key opens.
+/// machine and no other screen says what to do next. Where a first-boot
+/// enrolment is staged, it offers the automatic finalize beside the manual
+/// restart, and the automatic action writes the credential before restarting.
+/// `notes` states what arranging the opened containers owes about slots,
+/// which this says rather than does. `volumes` names what the key opens.
 pub(crate) fn finish(
     recovery: Option<&str>,
     log: Option<&Path>,
     steps: Option<&str>,
     notes: &[String],
     volumes: &[String],
+    offered: Offered,
     prompt: &Prompt,
 ) -> Result<(), String> {
     // No widget draws, so the streams are the only channel left.
@@ -208,26 +218,51 @@ pub(crate) fn finish(
     }
     // The whole key goes inside the box. A key held in no file and shown on
     // no screen leaves a disk the user cannot open.
-    match common::ui::offer_over(
-        copy::INSTALL_DONE,
-        done_rows(recovery, log, steps, notes, volumes),
-        copy::RESTART,
-        copy::DONE_KEYS,
-    )? {
-        false => Ok(()),
-        true => restart(),
+    let mut offered = offered;
+    loop {
+        let rows = done_rows(recovery, log, steps, notes, volumes, &offered);
+        let mut actions = Vec::new();
+        match &offered {
+            Offered::Ready(_) => actions.push(Choice::new(copy::FINALIZE_AUTO, "")),
+            Offered::Unavailable(why) => {
+                actions.push(Choice::new(copy::FINALIZE_AUTO, why.clone()).unavailable())
+            }
+            Offered::None => actions.push(Choice::new(copy::RESTART, "")),
+        }
+        if !matches!(offered, Offered::None) {
+            actions.push(Choice::new(copy::FINALIZE_MANUAL, ""));
+        }
+        match common::ui::offer_over(copy::INSTALL_DONE, rows, &actions, copy::DONE_KEYS)? {
+            None => return Ok(()),
+            Some(at) => {
+                if let (0, Offered::Ready(ready)) = (at, &offered) {
+                    if let Err(why) = automatic::finalize(ready) {
+                        // The recovery key is on this screen and in no file,
+                        // so a failed finalize draws the screen again rather
+                        // than restarting past the key.
+                        eprintln!("{PROGRAM}: {why}");
+                        offered = Offered::Unavailable(copy::AUTO_FAILED.to_string());
+                        continue;
+                    }
+                }
+                return restart();
+            }
+        }
     }
 }
 
 /// Builds the last screen's rows. They carry the key as text under its
 /// heading, the steps the firmware still asks for under their own, and where
-/// the log went. The key is the one row the user must copy by eye.
+/// the log went. The key is the one row the user must copy by eye. Where a
+/// first-boot enrolment is staged, the rows end with what each action does,
+/// and the automatic action's window draws in the warning colour.
 pub(crate) fn done_rows(
     recovery: Option<&str>,
     log: Option<&Path>,
     steps: Option<&str>,
     notes: &[String],
     volumes: &[String],
+    offered: &Offered,
 ) -> Vec<Choice> {
     let mut rows = Vec::new();
     if let Some(key) = recovery {
@@ -258,6 +293,24 @@ pub(crate) fn done_rows(
         rows.push(Choice::new(note.clone(), "").content());
     }
     rows.push(Choice::new(copy::logging(log), "").content());
+    if !matches!(offered, Offered::None) {
+        rows.push(Choice::new("", ""));
+        for (at, paragraph) in copy::automatic_explanation().into_iter().enumerate() {
+            if at > 0 {
+                rows.push(Choice::new("", ""));
+            }
+            for line in common::ui::table::wrap(paragraph, common::ui::ROW_ROOM) {
+                rows.push(Choice::new(line, "").content());
+            }
+        }
+        if let Offered::Ready(ready) = offered {
+            let window = match ready.pin {
+                true => copy::AUTO_WINDOW_PIN,
+                false => copy::AUTO_WINDOW,
+            };
+            rows.push(Choice::new(window, "").warning().content());
+        }
+    }
     rows
 }
 
