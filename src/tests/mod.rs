@@ -5,6 +5,7 @@ mod answers;
 mod automatic;
 mod backend;
 mod boot;
+mod cli;
 mod discover;
 mod disks;
 mod editor;

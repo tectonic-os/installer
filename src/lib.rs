@@ -9,6 +9,7 @@
 //! `TECT` when no flag names it. `docs/image-contract.md` states what the
 //! recipe and the image must hold.
 
+pub mod cli;
 pub mod copy;
 pub mod firmware;
 

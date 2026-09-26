@@ -9,7 +9,7 @@
 // derives them. The payload carries the image and the boot chain instead.
 
 pub const INSTALL_DISK: &str = "Installation disk";
-pub const INSTALL_NAME: &str = "Computer name";
+pub const INSTALL_NAME: &str = "Hostname";
 pub const INSTALL_USER: &str = "Username";
 pub const INSTALL_PASSWORD: &str = "Password";
 pub const INSTALL_ENCRYPTION: &str = "Encryption type";
@@ -351,25 +351,23 @@ pub fn custom_keep_boot(bootloader: &str) -> String {
 }
 
 /// The installer asks this once, after the form is complete and before it
-/// writes to the disk. One sentence carries the whole cost of installing.
+/// writes to the disk. The question carries the whole cost of installing.
 pub fn erasing(disk: &str) -> String {
-    format!("Everything on {disk} will be erased. Are you sure?")
+    format!("Erase everything on {disk}? This cannot be undone.")
 }
 
 pub fn changing_partitions(disk: &str) -> String {
-    format!("Partitions marked format on {disk} will be erased. Are you sure?")
+    format!("Erase the partitions marked format on {disk}? This cannot be undone.")
 }
 
 /// The layout removes partitions the user never marked for format, and one
 /// of them may carry another operating system. `changing_partitions` would
-/// tell the user the wrong thing, so this question says DELETED instead. The
+/// tell the user the wrong thing, so this question says DELETE instead. The
 /// summary lists each removed partition by name below it.
 pub fn removing_partitions(disk: &str, count: usize) -> String {
     match count {
-        1 => format!("1 partition on {disk} will be DELETED and its contents lost. Are you sure?"),
-        count => {
-            format!("{count} partitions on {disk} will be DELETED and their contents lost. Are you sure?")
-        }
+        1 => format!("DELETE 1 partition on {disk}? Its contents are lost."),
+        count => format!("DELETE {count} partitions on {disk}? Their contents are lost."),
     }
 }
 
@@ -409,7 +407,7 @@ pub const EXIT_SHELL: &str = "Switch to shell";
 /// The calling command reads the VT number from the machine, because the
 /// installer cannot assume which VT it runs on.
 pub fn switch_note(vt: u32) -> String {
-    format!("The installer is running on tty{vt}. To return to the installer press Ctrl+Alt+F{vt}.")
+    format!("Installer on tty{vt}; press Ctrl+Alt+F{vt} to return.")
 }
 pub const ROW_CONFIRM: &str = "password (confirm)";
 pub const ROW_LAYOUT: &str = "partition layout";
@@ -620,12 +618,12 @@ pub fn logging(log: Option<&std::path::Path>) -> String {
 }
 
 /// A user watching an install cannot ask for two facts. This line says that
-/// the old disk contents are already gone and where the transcript is. It
-/// stays short, because it draws as one line inside a box.
+/// the disk is being overwritten and where the transcript is. It stays short,
+/// because it draws as one line inside a box.
 pub fn writing(log: Option<&std::path::Path>) -> String {
     match log {
-        Some(at) => format!("no going back from here \u{2014} log: {}", at.display()),
-        None => "no going back from here \u{2014} and this screen is the log".to_string(),
+        Some(at) => format!("disk being overwritten; log: {}", at.display()),
+        None => "disk being overwritten; this screen is the only log".to_string(),
     }
 }
 
@@ -638,7 +636,7 @@ pub fn recovery(key: &str) -> String {
 /// The completion screen draws this above the key. Where there is no screen
 /// to draw on, `recovery` appends the key to this line instead.
 pub fn write_down() -> &'static str {
-    "Write it down and save it somewhere safe."
+    "Write it down; it is the only copy."
 }
 
 pub const RECOVERY_HEADING: &str = "LUKS disk encryption recovery key:";
@@ -650,7 +648,7 @@ pub const LEAVE_OVER: &str = "Start the form again";
 /// On installer media the unit starts the installer again, so quitting
 /// returns the user to a shell only where they ran the installer from one.
 pub const LEAVE_SHELL: &str = "Quit the installer";
-pub const INSTALL_DONE: &str = "Installation Complete!";
+pub const INSTALL_DONE: &str = "Installation Complete";
 pub const RESTART: &str = "Restart now";
 /// The legend already names esc, so the last screen draws no row for it.
 pub const DONE_KEYS: &str = "enter to finalize, esc to quit the installer";
@@ -659,19 +657,16 @@ pub const DONE_KEYS: &str = "enter to finalize, esc to quit the installer";
 /// the initrd, and the first boot removes it after the TPM is enrolled.
 pub const FINALIZE_AUTO: &str = "Restart and finalize (automatic)";
 pub const FINALIZE_MANUAL: &str = "Restart and finalize (manual)";
-/// The completion screen explains what the automatic action does, in the
-/// owner's words. Each paragraph wraps to its own run of rows, as the
-/// firmware steps do.
+/// The completion screen explains what the automatic action does. Each
+/// paragraph wraps to its own run of rows, as the firmware steps do.
 pub fn automatic_explanation() -> [&'static str; 2] {
     [
-        "The installer will reboot once to automatically enrol LUKS with the TPM. \
-         This creates a temporary TPM-encrypted LUKS key on the ESP partition which \
-         will be used to unlock the LUKS partition on the next boot. A post-install \
-         script will then automatically enrol the LUKS partition with the TPM, remove \
-         the temporary key entry from the LUKS partition and delete the temporary key \
-         before restarting.",
-        "If you would prefer to manually unlock the LUKS partition on the next boot \
-         with the recovery key, choose 'Manual' below.",
+        "This reboots once to enrol LUKS with the TPM. A temporary TPM-encrypted \
+         key is staged on the ESP and unlocks the disk on the next boot; the first \
+         boot then enrols the TPM, removes the temporary key entry from LUKS and \
+         deletes the temporary key before restarting.",
+        "Choose 'Manual' below to unlock the next boot with the recovery key \
+         instead.",
     ]
 }
 /// The automatic action's window. The credential opens the volume until the
@@ -691,7 +686,7 @@ pub const AUTO_FAILED: &str = "the automatic finalize failed; choose manual rest
 /// is still not the owner's. Vendors name that mode differently, so the text
 /// gives the common wording too.
 pub fn next_steps_setup() -> &'static str {
-    "Before the installed image can boot you will need to set secure-boot to 'setup mode'. Exact steps to enable 'setup mode' are vendor specific but may require you to set secure-boot to 'custom' then deleting the existing platform key (PK)."
+    "Before the installed image boots, set secure boot to 'setup mode'. The steps are vendor specific: often set secure boot to 'custom', then delete the existing platform key (PK)."
 }
 
 /// The shim chain asks the user for one confirmation and no firmware change.
@@ -736,9 +731,9 @@ pub const UKI_DB_OWNER: &str = "the owner key is enrolled; nothing to change";
 /// empty row as a blank line.
 pub fn required_uki_db() -> [&'static str; 3] {
     [
-        "Secure-boot with the systemd-boot bootloader requires the image's platform key to be set in this system's UEFI.",
+        "Secure boot with the systemd-boot bootloader needs the image's platform key set in this system's UEFI.",
         "",
-        "The existing platform key will be deleted, so any existing OS on this system will no longer boot with secure-boot on.",
+        "The existing platform key is deleted, so any existing OS here stops booting with secure boot on.",
     ]
 }
 
@@ -754,13 +749,13 @@ pub const NONE: &str = "none";
 
 #[cfg(test)]
 mod tests {
-    /// The question that costs a disk names the disk and ends in a question
-    /// mark. It is the last thing between the user and a wipe.
+    /// The question that costs a disk names the disk and asks. It is the last
+    /// thing between the user and a wipe.
     #[test]
     fn the_cost_names_the_disk_and_asks() {
         let said = super::erasing("/dev/vda");
         assert!(said.contains("/dev/vda"), "{said}");
-        assert!(said.ends_with('?'), "{said}");
+        assert!(said.contains('?'), "{said}");
     }
 
     /// A widget draws a question into a one-line head, so a question that

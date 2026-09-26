@@ -39,8 +39,10 @@ draws what comes back.
     ./lint.sh          the dependency floor, the boundary, formatting and the tests
     ./lint.sh --fix    format
 
-`common` and `libc` are the whole dependency floor, and `lint.sh` fails if that
-moves. It also fails if a file under `src/` or `tests/` names the `tect` crate
+`clap`, `common` and `libc` are the runtime dependency floor, and
+`clap-markdown` renders the command reference in a test alone. `lint.sh` fails
+if either moves. It also fails if a file under `src/` or `tests/` names the
+`tect` crate
 or spawns the `tect` binary. A file under `src/` fails if it reaches ratatui at
 all, because `common` is the only way to draw; the goldens under `tests/` may
 name ratatui in a comment. Those checks are the split, so they run before cargo

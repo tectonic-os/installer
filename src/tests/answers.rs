@@ -203,8 +203,8 @@ fn the_confirmation_names_every_partition_it_will_remove() {
     assert!(flat.contains("/boot/efi"), "{flat}");
     // The confirmation question counts the removals.
     let asked = copy::removing_partitions("/dev/sda", 3);
-    assert!(asked.contains('3') && asked.contains("DELETED"), "{asked}");
-    assert!(copy::removing_partitions("/dev/sda", 1).starts_with("1 partition "));
+    assert!(asked.contains('3') && asked.contains("DELETE"), "{asked}");
+    assert!(copy::removing_partitions("/dev/sda", 1).starts_with("DELETE 1 partition "));
 }
 
 /// The recipe carries the PIN in its own field. The passphrase stays empty,

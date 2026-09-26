@@ -216,7 +216,7 @@ fn the_confirm_screen_shows_what_is_about_to_be_erased() {
     );
     let question = copy::erasing(&answers.disk);
     assert!(
-        question.contains("/dev/vda") && question.contains("erased"),
+        question.contains("Erase everything on /dev/vda"),
         "{question}"
     );
     assert!(!question.contains("hunter2"));

@@ -10,6 +10,7 @@ name = "tect-installer"
 path = "src/main.rs"
 
 [dependencies]
+clap = { version = "4.6.7", features = ["derive"] }
 libc = "0.2"
 # Pinned by rev, never by version. A change in `common` is a commit there and
 # a bump here, which keeps the rev that was built with visible in `Cargo.lock`.
@@ -29,3 +30,7 @@ inherits = "release"
 opt-level = "s"
 lto = true
 codegen-units = 1
+
+# Renders `docs/commands.md` in a test, so it never reaches a dist binary.
+[dev-dependencies]
+clap-markdown = "0.1.5"

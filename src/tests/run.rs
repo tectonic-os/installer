@@ -149,7 +149,7 @@ fn the_last_screen_explains_the_two_actions() {
     let explained = &said[..window];
     let start = explained
         .iter()
-        .position(|line| line.starts_with("The installer will reboot"))
+        .position(|line| line.starts_with("This reboots once"))
         .expect("the explanation is drawn");
     let paragraphs = copy::automatic_explanation();
     let joined = explained[start..]
@@ -171,7 +171,7 @@ fn the_last_screen_explains_the_two_actions() {
     );
     let second = explained
         .iter()
-        .position(|line| line.starts_with("If you would prefer"))
+        .position(|line| line.starts_with("Choose 'Manual' below"))
         .expect("the manual paragraph is drawn");
     assert!(explained[second - 1].is_empty(), "a blank parts them");
     assert_eq!(said[window], copy::AUTO_WINDOW_PIN);

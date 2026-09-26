@@ -15,12 +15,16 @@ mapfile -t crate_src < <(find . -path ./target -prune -o -name '*.rs' -type f -p
 # This binary installs a bootc image and knows nothing about the tool that
 # built one. A `tect` dependency here would put the repository model back in
 # the installer and undo the split, and `common` is the only way to ratatui.
+# clap owns the command line, so parsing, help, refusals and `docs/commands.md`
+# read one tree.
 #
 # `normal,dev,build` and not `normal` alone: a `[dev-dependencies]` entry is
 # exactly how the coupling would come back, since the split's own history is
-# that what looked like 83 production references were 72 test fixtures.
+# that what looked like 83 production references were 72 test fixtures. That is
+# also why `clap-markdown` is named here: it renders the reference in a test
+# alone, so no renderer reaches the dist binary.
 deps=$(cargo tree -e normal,dev,build --depth 1 --prefix none | awk 'NR > 1 {print $1}' | sort -u | tr '\n' ' ')
-if [ "$deps" != "common libc " ]; then
+if [ "$deps" != "clap clap-markdown common libc " ]; then
     echo "lint: the dependency floor moved, it is now: $deps" >&2
     exit 1
 fi

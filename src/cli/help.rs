@@ -1,14 +1,9 @@
-# Commands
+//! These constants hold the prose `--help` prints past the usage line.
+//! `docs/commands.md` is rendered from the same strings.
 
-This document contains the help content for the `tect-installer` command-line program.
+pub(super) const ABOUT: &str = "install the image this media carries onto a disk";
 
-**Command Overview:**
-
-* [`tect-installer`↴](#tect-installer)
-
-## `tect-installer`
-
-`tect-installer` installs a built bootc image onto this machine's disk, from a
+pub(super) const LONG_ABOUT: &str = r#"`tect-installer` installs a built bootc image onto this machine's disk, from a
 payload the media carries rather than from a registry. The tool that builds an
 image and the binary that writes it to a disk are separate repositories,
 released apart.
@@ -27,11 +22,9 @@ Run by hand it takes a lock on `/run/tect-installer.lock` for the length of the
 run, so a second one refuses and names the terminal holding the first. The lock
 is the process's: nothing has to be cleaned up after an installer that was
 killed. `$TECT_INSTALLER_LOCK` names the file elsewhere, which is how the
-screens are run without root.
+screens are run without root."#;
 
-**Usage:** `tect-installer [OPTIONS]`
-
-Notes:
+pub(super) const NOTES: &str = r#"Notes:
 
 - **A payload root is a directory carrying `install-recipe.json`.** That is the
   whole discovery rule. The document is what `tect recipe` emits and what
@@ -133,19 +126,4 @@ Notes:
 - `user.groups` is merged rather than replaced. The group in the emitted recipe
   is the *target's* admin group, `sudo` on Debian and `wheel` on Fedora, and
   `useradd` refuses the whole call when it is handed a group the target has not
-  got.
-
-###### **Options:**
-
-* `--from <dir>` — the payload root, else the one a TECT partition or this media carries
-* `--disk <dev>` — the block device to erase and install onto
-* `--hostname <name>` — what the installed machine is called, else the published name the recipe carries
-* `--user <name>` — the account to create, in the target's admin group
-* `--password <secret>` — its password, hashed before it is written anywhere
-* `--encryption <type>` — none, tpm2-luks, luks-passphrase, tpm2-luks-passphrase or tpm2-luks-pin; none by default
-* `--passphrase <secret>` — what unlocks the disk, for the two forms that are named for it
-* `--pin <secret>` — typed at every unlock alongside the TPM policy, for tpm2-luks-pin alone
-* `--no-tui` — ask nothing, and fail naming the flag a missing answer needs
-
-
-
+  got."#;

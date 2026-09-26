@@ -166,6 +166,87 @@ fn drawn_flow(name: &str, dir: &Path, command: &str, after: &str, steps: &[&[u8]
     );
 }
 
+/// `--version` is the probe the media build runs before it pins the binary,
+/// so the line keeps the shape the release tag gives it.
+#[test]
+fn version_names_the_program_and_the_release() {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_tect-installer"))
+        .arg("--version")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        format!("{} v{}\n", installer::PROGRAM, env!("CARGO_PKG_VERSION"))
+    );
+}
+
+/// A bad invocation is refused before a payload root is read, in the run's one
+/// `Error:` line and with the usage exit code.
+#[test]
+fn a_bad_invocation_is_refused_with_the_usage_code() {
+    for (args, said) in [
+        (["--bogus"].as_slice(), "unexpected argument"),
+        (["--disk"].as_slice(), "a value is required"),
+    ] {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_tect-installer"))
+            .args(args)
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(1), "{args:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.starts_with("Error: "), "{args:?}: {stderr}");
+        assert!(stderr.contains(said), "{args:?}: {stderr}");
+    }
+}
+
+/// The hand-rendered usage line left with the parser, so `--help` has to name
+/// every flag the tree declares.
+#[test]
+fn help_prints_every_flag_and_exits_zero() {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_tect-installer"))
+        .arg("--help")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for flag in [
+        "--from",
+        "--disk",
+        "--hostname",
+        "--user",
+        "--password",
+        "--encryption",
+        "--passphrase",
+        "--pin",
+        "--no-tui",
+    ] {
+        assert!(stdout.contains(flag), "{flag} is not in the help: {stdout}");
+    }
+}
+
+/// The reference in docs/commands.md, rendered from the clap tree the parser
+/// reads, so the reference and the parser cannot disagree.
+#[test]
+fn commands_doc() {
+    use clap::CommandFactory;
+    let path = crate_dir().join("docs/commands.md");
+    let options = clap_markdown::MarkdownOptions::new()
+        .title("Commands".to_string())
+        .show_footer(false);
+    let rendered =
+        clap_markdown::help_markdown_command_custom(&installer::cli::Args::command(), &options);
+    if std::env::var_os("UPDATE_GOLDEN").is_some() {
+        std::fs::write(&path, rendered).unwrap();
+        return;
+    }
+    let doc = std::fs::read_to_string(&path).expect("docs/commands.md exists");
+    assert!(
+        doc == rendered,
+        "docs/commands.md is stale. Rerun with UPDATE_GOLDEN=1 and read the diff"
+    );
+}
+
 /// `tect-installer.service` owns tty1, but the serial console and the other
 /// VTs autologin root with this binary on `PATH`. A second installer is
 /// refused there and told which console holds the first. The lock stops two
@@ -616,7 +697,7 @@ esac
     // The note under the ready line states the cost of continuing. The note
     // is redrawn cell by cell over what was under it, so only its last word
     // stays contiguous.
-    assert!(transcript.contains("erased"), "{transcript}");
+    assert!(transcript.contains("undone"), "{transcript}");
     // Both disks were offered under the disk row, and the walk took the one
     // its steps moved to. Device names stay contiguous where their models do
     // not.
