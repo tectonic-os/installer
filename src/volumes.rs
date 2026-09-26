@@ -1,7 +1,6 @@
 use super::*;
 use std::io::Write as _;
 
-/// Names the file fisherman's whole output is written to.
 const LOG: &str = "tect-install.log";
 
 /// Holds the log where no partition can. An iso-only boot has RAM and
@@ -38,14 +37,14 @@ fn remounted_rw(at: &str) -> bool {
         .is_ok_and(|out| out.status.success())
 }
 
-/// Names the device an opened container appears at, which is what fisherman
-/// mounts.
+/// Names the device an opened container appears at. The installer mounts the
+/// container's filesystem through this device.
 pub(crate) fn mapper_path(name: &str) -> String {
     format!("/dev/mapper/{name}")
 }
 
 /// Holds the mapper names an install has open. Dropping this closes every one
-/// of them, on every way out of `run`. A failed fisherman, a key that does not
+/// of them, on every way out of `run`. A failed `bootc`, a key that does not
 /// fit and a finished install all reach the same drop.
 #[derive(Default)]
 pub(crate) struct Mappers(Vec<String>);
@@ -60,9 +59,9 @@ impl Drop for Mappers {
     }
 }
 
-/// Opens every container the layout names, before anything is written. A
-/// container that does not open stops the install here, with the partitions
-/// untouched.
+/// Opens every container the layout names, before the installer writes any
+/// filesystem.
+/// A container that does not open stops the install here.
 pub(crate) fn open_volumes(layout: Option<&CustomLayout>) -> Result<Mappers, String> {
     let mut opened = Mappers::default();
     let Some(layout) = layout else {
@@ -94,11 +93,6 @@ pub(crate) fn open_command(open: &LuksOpen, name: &str) -> Command {
 }
 
 pub(crate) fn open_volume(open: &LuksOpen, name: &str) -> Result<(), String> {
-    // A mapper left behind by a killed install fails `luksOpen` on a retry in
-    // the same boot. Fisherman clears its own mappers the same way.
-    if Path::new(&mapper_path(name)).exists() {
-        let _ = close_volume(name);
-    }
     let mut command = open_command(open, name);
     command.stdout(Stdio::null()).stderr(Stdio::piped());
     if open.key.bytes().is_some() {
@@ -123,6 +117,41 @@ pub(crate) fn open_volume(open: &LuksOpen, name: &str) -> Result<(), String> {
         false => Err(format!(
             "cryptsetup could not open {}: {}",
             open.partition,
+            String::from_utf8_lossy(&out.stderr).trim()
+        )),
+    }
+}
+
+/// Builds `cryptsetup`'s call that makes a LUKS2 container. The key arrives
+/// on stdin, so it never reaches the process list.
+pub(crate) fn format_command(partition: &str) -> Command {
+    let mut command = Command::new("cryptsetup");
+    command
+        .args(["-q", "luksFormat", "--type", "luks2", "--key-file", "-"])
+        .arg(partition);
+    command
+}
+
+pub(crate) fn luks_format(partition: &str, key: &[u8]) -> Result<(), String> {
+    let mut child = format_command(partition)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| format!("cryptsetup: {err}, and it is what encrypts {partition}"))?;
+    child
+        .stdin
+        .take()
+        .ok_or("cryptsetup: no stdin")?
+        .write_all(key)
+        .map_err(|err| format!("cryptsetup: {err}"))?;
+    let out = child
+        .wait_with_output()
+        .map_err(|err| format!("cryptsetup: {err}"))?;
+    match out.status.success() {
+        true => Ok(()),
+        false => Err(format!(
+            "cryptsetup could not encrypt {partition}: {}",
             String::from_utf8_lossy(&out.stderr).trim()
         )),
     }

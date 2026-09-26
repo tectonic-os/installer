@@ -26,13 +26,16 @@ Two inputs, and neither is this project's build tool. A recipe document,
 that recipe names.
 
 `docs/image-contract.md` states what each must hold. The short version: a
-hand-written recipe needs `image`, `hostname` and `filesystem`, and an image
-needs nothing at all unless it wants a signed boot chain or an encrypted root.
+hand-written recipe needs `image`, `hostname`, `filesystem`, `bootloader` and
+`additionalImageStores`, and an image needs no other field unless it declares a
+signed boot chain or an encrypted root.
 Any bootc workflow can write that input.
 
-`fisherman` is the backend. It does the partitioning, the LUKS work and the
-`bootc install`; this finds the payload, completes its recipe, hands it over and
-draws what comes back.
+The installer performs every step itself. It finds the payload, cuts and
+formats the disk,
+creates and opens the LUKS containers, runs `bootc install to-filesystem` from
+the payload's image through `podman`, and writes the hostname, the account and
+the unlock configuration into the installed deployment.
 
 ## Working on it
 

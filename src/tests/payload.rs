@@ -42,78 +42,44 @@ fn a_payload_wins_over_the_repository_that_would_have_to_be_built() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// `classify` requires `image` and `hostname`, and a recipe of those two
-/// alone still cannot install. `complete` never writes `filesystem`, and
-/// fisherman refuses an auto-partitioning recipe whose `filesystem` is not
-/// one of xfs, ext4, btrfs or zfs. The third field must survive `complete`
-/// untouched, because nothing downstream supplies it.
+/// A hand-written recipe can use the image as its update reference, but it
+/// must name the media store that carries the image.
 #[test]
-fn three_hand_written_fields_are_the_floor_for_a_generic_bootc_image() {
+fn a_hand_written_recipe_names_the_media_store() {
     let root = scratch("non-tectonic");
     let recipe = root.join(RECIPE);
     let hand_written = "{\n  \"image\": \"quay.io/fedora/fedora-bootc:42\",\n  \
-             \"hostname\": \"workstation\",\n  \"filesystem\": \"ext4\"\n}";
+             \"hostname\": \"workstation\",\n  \"filesystem\": \"ext4\",\n  \
+             \"bootloader\": \"grub2\",\n  \
+             \"additionalImageStores\": [\"/var/lib/tectonic/store\"]\n}";
     std::fs::write(&recipe, hand_written).expect("a hand-written recipe");
     let Ok(Found::Image(payload)) = classify(&root) else {
-        panic!("three fields are a payload");
+        panic!("a hand-written recipe with a store is a payload");
     };
     assert_eq!(payload.image, "quay.io/fedora/fedora-bootc:42");
     assert_eq!(payload.filesystem, "ext4");
-    // An absent `bootloader` reads as `grub2`, so the summary still draws a
-    // separate `/boot` row. An absent `boot` draws no boot chain row.
-    assert!(payload.bootloader.is_empty());
+    // An absent `boot` draws no boot chain row.
+    assert_eq!(payload.bootloader, "grub2");
     assert!(payload.boot.is_empty());
     assert!(!payload.composefs);
     // Without a LUKS initramfs every encrypted kind is refused, so a hand
     // written recipe installs the machine plain.
     assert!(!payload.luks_initramfs);
+    assert_eq!(payload.install.target_imgref, payload.image);
+    assert_eq!(payload.install.stores, ["/var/lib/tectonic/store"]);
     // The `none` kind is left out, so every row here is an encrypted kind.
     assert!(kinds(true, payload.luks_initramfs, false)
         .iter()
         .all(|kind| !kind.available));
 
-    let answers = Answers {
-        disk: "/dev/vda".to_string(),
-        hostname: "workstation".to_string(),
-        user: "tect".to_string(),
-        password: "hunter2".to_string(),
-        opened: Opened::Keep,
-        encryption: Encryption {
-            kind: NONE.to_string(),
-            passphrase: String::new(),
-            pin: String::new(),
-        },
-        data: Data::default(),
-        layout: None,
-    };
-    let done = complete(&recipe, &answers).expect("the person's half goes in");
-    // The user answers `disk` and `hostname`. The hand written recipe carries
-    // `image` and `filesystem` through `complete` untouched.
-    for (key, value) in [
-        ("disk", "/dev/vda"),
-        ("hostname", "workstation"),
-        ("image", "quay.io/fedora/fedora-bootc:42"),
-        ("filesystem", "ext4"),
-    ] {
-        assert_eq!(json::text(&done, key).as_deref(), Some(value), "{key}");
-    }
-    // No base family derived an admin group here, so the account goes in
-    // with no groups.
-    let user = json::field(&done, "user").expect("an account");
-    assert_eq!(json::text(user, "username").as_deref(), Some("tect"));
-    assert!(json::strings(user, "groups").is_empty());
-
-    // A two field recipe still classifies, and `complete` leaves it with no
-    // `filesystem` for fisherman to take.
     std::fs::write(
         &recipe,
-        "{\n  \"image\": \"quay.io/fedora/fedora-bootc:42\",\n  \
-             \"hostname\": \"workstation\"\n}",
+        "{\"image\":\"image\",\"hostname\":\"host\",\"filesystem\":\"ext4\",\
+         \"bootloader\":\"grub2\"}",
     )
-    .expect("a two-field recipe");
-    assert!(matches!(classify(&root), Ok(Found::Image(_))));
-    let thin = complete(&recipe, &answers).expect("the person's half goes in");
-    assert_eq!(json::text(&thin, "filesystem"), None);
+    .expect("a recipe without a store");
+    let refused = classify(&root).unwrap_err();
+    assert!(refused.contains("additionalImageStores"), "{refused}");
     let _ = std::fs::remove_dir_all(&root);
 }
 

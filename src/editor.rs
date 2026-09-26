@@ -26,10 +26,10 @@ pub(crate) enum PartAction {
     Reset,
     Open,
     Close,
-    /// Changes the partition table itself. `run` enacts every one of these
-    /// through `sfdisk` before fisherman is handed the recipe: `Delete` and
-    /// `Clear` plan a removal, `Create` plans a cut whose name rides in the
-    /// script, and `Rename` writes an existing partition's label.
+    /// Changes the partition table itself. `cut_partitions` enacts every one
+    /// of these through `sfdisk` before the installer formats any partition.
+    /// `Delete` and `Clear` plan a removal. `Create` plans a cut whose name
+    /// rides in the script. `Rename` writes an existing partition's label.
     Delete,
     Clear,
     Create,
@@ -60,20 +60,17 @@ pub(crate) fn fits(target: &str, fstype: &str) -> bool {
 
 /// Lists the mount points one partition can take. A partition is never
 /// offered a mount point its filesystem cannot carry. `boot` allows a separate
-/// `/boot`, which is an answer only where the target's bootloader can read one,
-/// and `composefs` leaves `/var` out because bootc binds it before any fstab
-/// unit runs. A point under `/var` still mounts.
+/// `/boot`, which is an answer only where the target's bootloader can read
+/// one.
 pub(crate) fn assigns(
     partition: &Partition,
     answer: Option<&Mounted>,
     boot: bool,
-    composefs: bool,
 ) -> Vec<&'static str> {
     let holds = effective_fs(partition, answer);
     copy::mount_points()
         .into_iter()
         .filter(|target| *target != "/boot" || boot)
-        .filter(|target| *target != "/var" || !composefs)
         .filter(|target| fits(target, &holds))
         .collect()
 }
@@ -81,13 +78,9 @@ pub(crate) fn assigns(
 /// Lists the mount points an open container takes. A closed container is
 /// offered none, because what is inside stays unknown until the user gives
 /// the key. `/boot/efi` stays out, because the firmware reads the ESP before
-/// anything opens the container, and `composefs` leaves `/var` out as
-/// `assigns` does.
-pub(crate) fn open_points(composefs: bool) -> Vec<&'static str> {
-    ["/", "/var", "/var/home"]
-        .into_iter()
-        .filter(|target| *target != "/var" || !composefs)
-        .collect()
+/// the installer opens the container.
+pub(crate) fn open_points() -> Vec<&'static str> {
+    vec!["/"]
 }
 
 /// Builds the Assign submenu from the mount points a partition can take.
@@ -106,7 +99,6 @@ pub(crate) fn mount_name(target: &str) -> &'static str {
         "/boot/efi" => "EFI-SYSTEM",
         "/boot" => "boot",
         "/" => "root",
-        "/var" | "/var/home" => "var",
         _ => "",
     }
 }
@@ -161,12 +153,15 @@ pub(crate) fn held_layout<'a>(
 
 /// Points one partition's answer at a mount point. An open container keeps
 /// the key it was opened with. Every other partition becomes a mount that
-/// stays `unformatted` until a Format answer rewrites it.
+/// stays `unformatted` until a Format answer rewrites it. Assigning `/` to a
+/// kept partition records `root_fs` as its format at once, because bootc
+/// installs only onto an empty root.
 pub(crate) fn place_target(
     held: &mut Option<CustomLayout>,
     disk: &str,
     partition: &Partition,
     target: &str,
+    root_fs: &str,
 ) {
     let layout = held_layout(held, disk);
     if let Some(open) = layout
@@ -177,16 +172,30 @@ pub(crate) fn place_target(
         open.target = target.to_string();
         return;
     }
+    let fstype = match target {
+        "/" => root_fs,
+        _ => "unformatted",
+    };
     match layout
         .mounts
         .iter_mut()
         .find(|mount| mount.partition == partition.device)
     {
-        Some(mount) => mount.target = target.to_string(),
+        Some(mount) => {
+            // A partition leaving `/` drops the format that assigning `/`
+            // gave it, so a kept partition moved elsewhere stays kept.
+            if mount.target == "/" && target != "/" && mount.fstype == root_fs {
+                mount.fstype = "unformatted".to_string();
+            }
+            mount.target = target.to_string();
+            if mount.fstype == "unformatted" {
+                mount.fstype = fstype.to_string();
+            }
+        }
         None => layout.mounts.push(CustomMount {
             partition: partition.device.clone(),
             target: target.to_string(),
-            fstype: "unformatted".to_string(),
+            fstype: fstype.to_string(),
             passphrase: String::new(),
         }),
     }
@@ -306,8 +315,6 @@ pub(crate) fn layout_table(
     disk: &str,
     layout: Option<&CustomLayout>,
     payload: &Payload,
-    var_size: &str,
-    home: bool,
     encrypted: bool,
 ) -> TableData {
     let mut table = TableData::default();
@@ -368,13 +375,13 @@ pub(crate) fn layout_table(
         );
         match layout {
             // An automatic layout replaces the chosen disk's partitions with
-            // the plan fisherman would cut. The rows are grey and
+            // the plan `layout::whole_disk` cuts. The rows are grey and
             // unselectable, because the user answers nothing on them.
             None if chosen => {
                 // `automatic_rows` already wrote the tree glyphs into each
                 // name, so no glyph is added here.
                 for (name, size, filesystem, kind, mount) in
-                    automatic_rows(payload, var_size, size_gb(&size), home, encrypted)
+                    automatic_rows(payload, size_gb(&size), encrypted)
                 {
                     table.push(
                         vec![
@@ -416,7 +423,7 @@ pub(crate) fn layout_table(
                             false => "\u{251c}\u{2500} ",
                         };
                         let device = devices.get(at).cloned().unwrap_or_default();
-                        let (menus, actions) = created_menu(create, boot, payload.composefs);
+                        let (menus, actions) = created_menu(create, boot);
                         table.push(
                             created_cells(create, &device, branch),
                             true,
@@ -467,7 +474,7 @@ fn partition_rows(
         let renamed = held.and_then(|held| held.renamed(&partition.device));
         let cells = partition_cells(partition, answer, branch, deleted, renamed);
         let (menus, actions) = match held {
-            Some(held) => partition_menu(partition, Some(held), boot, payload.composefs),
+            Some(held) => partition_menu(partition, Some(held), boot),
             None => (Vec::new(), Vec::new()),
         };
         table.push(cells, chosen, menus, actions, RowKind::Part { index: at });
@@ -554,44 +561,22 @@ pub(crate) fn size_gb(text: &str) -> Option<u64> {
         .map(|number| number as u64)
 }
 
-/// Builds the automatic plan, one row per partition fisherman would cut. The
-/// ESP is always cut. A non-systemd bootloader adds a `/boot`, and both stay
-/// outside any container. The root follows, inside the LUKS container where
-/// the answer encrypts it. `home` asks for a home partition of its own, cut
-/// out of the container. The home row is drawn as soon as the user chooses
-/// it and before its size is typed, so the table shows what the answer did.
-/// Sizes come from the disk where its size is known. The root row reads `the
-/// rest` where the disk size is unknown, where the arithmetic underflows, and
-/// where a separate home is asked for with no size typed yet.
+/// Builds the automatic plan, one row per partition `layout::whole_disk`
+/// cuts. The ESP is always cut. A non-systemd bootloader adds a `/boot`, and
+/// both stay outside any container. The root follows, inside the LUKS
+/// container where the answer encrypts it. Sizes come from the disk where its
+/// size is known. The root row reads `the rest` where the disk size is unknown
+/// or the arithmetic underflows.
 pub(crate) fn automatic_rows(
     payload: &Payload,
-    var_size: &str,
     disk: Option<u64>,
-    home: bool,
     encrypted: bool,
 ) -> Vec<(String, String, String, String, String)> {
     let filesystem = payload.filesystem.clone();
-    // The ESP costs 2 GB and a non-systemd bootloader's `/boot` costs 2 more.
-    // What the disk leaves after them becomes the root or its container.
+    // What the disk leaves after the ESP and a GRUB target's `/boot` becomes
+    // the root or its container.
     let boot = payload.bootloader != "systemd";
-    let left = disk.and_then(|disk| disk.checked_sub(2 + if boot { 2 } else { 0 }));
-    // `home` gates the home row alone. The root row shrinks by whatever
-    // `var_size` holds, whether or not a home row is drawn, so every caller
-    // blanks `var_size` when the user shares the root. `collect.rs` does it
-    // where it builds the size it passes in.
-    let separate = home;
-    let home_size = match var_size.is_empty() {
-        true => None,
-        false => size_gb(var_size),
-    };
-    // The root takes what the disk leaves after the ESP and `/boot`, less any
-    // home size the user typed. A separate home with no size typed leaves the
-    // root size unknown.
-    let root_size = match home_size {
-        Some(home) => left.and_then(|left| left.checked_sub(home)),
-        None if separate => None,
-        None => left,
-    };
+    let left = disk.and_then(|disk| disk.checked_sub(ESP_GB + if boot { BOOT_GB } else { 0 }));
     let said = |size: Option<u64>| match size {
         Some(size) => copy::size_said(&size.to_string()),
         None => "the rest".to_string(),
@@ -603,7 +588,7 @@ pub(crate) fn automatic_rows(
     // type column.
     let mut rows: Vec<(String, String, String, String, String, bool)> = vec![(
         "EFI-SYSTEM".to_string(),
-        copy::size_said("2"),
+        copy::size_said(&ESP_GB.to_string()),
         "fat32".to_string(),
         "efi".to_string(),
         "/boot/efi".to_string(),
@@ -612,7 +597,7 @@ pub(crate) fn automatic_rows(
     if boot {
         rows.push((
             "boot".to_string(),
-            copy::size_said("2"),
+            copy::size_said(&BOOT_GB.to_string()),
             "ext4".to_string(),
             "linux".to_string(),
             "/boot".to_string(),
@@ -622,23 +607,10 @@ pub(crate) fn automatic_rows(
     let root = |inside| {
         (
             "root".to_string(),
-            said(root_size),
+            said(left),
             filesystem.clone(),
             "linux".to_string(),
             "/".to_string(),
-            inside,
-        )
-    };
-    let home = |inside| {
-        (
-            "var".to_string(),
-            match home_size {
-                Some(size) => copy::size_said(&size.to_string()),
-                None => copy::size_said(var_size),
-            },
-            filesystem.clone(),
-            "linux".to_string(),
-            "/var/home".to_string(),
             inside,
         )
     };
@@ -652,14 +624,8 @@ pub(crate) fn automatic_rows(
             false,
         ));
         rows.push(root(true));
-        if separate {
-            rows.push(home(true));
-        }
     } else {
         rows.push(root(false));
-        if separate {
-            rows.push(home(false));
-        }
     }
     // The last row of each level takes the corner glyph. A row inside the
     // container indents three columns, under the space the container's own
@@ -707,9 +673,12 @@ fn partition_cells(
             common::ui::Cell::new(""),
         ];
     }
-    let rewritten = answer
-        .as_ref()
-        .is_some_and(|mounted| mounted.fstype != OPEN && mounted.fstype != "unformatted");
+    // An opened root is formatted inside its container, so it carries the
+    // tick as a rewritten partition does.
+    let rewritten = answer.as_ref().is_some_and(|mounted| {
+        (mounted.fstype != OPEN && mounted.fstype != "unformatted")
+            || (mounted.fstype == OPEN && mounted.target == "/")
+    });
     let filesystem = match &answer {
         Some(mounted) if mounted.fstype == OPEN => common::ui::Cell::set(copy::LUKS_OPEN),
         Some(mounted) if mounted.fstype != "unformatted" => common::ui::Cell::set(&mounted.fstype),
@@ -759,13 +728,12 @@ fn partition_cells(
 }
 
 /// Builds one existing partition's popup and the action each item answers
-/// with. Building the popup writes nothing to the disk. `boot` and `composefs`
-/// shape the Assign list as `assigns` does.
+/// with. Building the popup writes nothing to the disk. `boot` shapes the
+/// Assign list as `assigns` does.
 pub(crate) fn partition_menu(
     partition: &Partition,
     held: Option<&CustomLayout>,
     boot: bool,
-    composefs: bool,
 ) -> (Vec<common::ui::MenuItem>, Vec<PartAction>) {
     // A partition the plan will remove offers `Reset` alone. Nothing can be
     // mounted, formatted or opened on a partition that will not be there, and
@@ -796,7 +764,7 @@ pub(crate) fn partition_menu(
     };
     if container {
         if opened {
-            let points = assign_children(&open_points(composefs));
+            let points = assign_children(&open_points());
             items.push(common::ui::MenuItem::under(copy::ASSIGN, &points));
             actions.push(PartAction::Assign);
         }
@@ -813,7 +781,7 @@ pub(crate) fn partition_menu(
             }
         }
     } else {
-        let points = assigns(partition, answer.as_ref(), boot, composefs);
+        let points = assigns(partition, answer.as_ref(), boot);
         if !points.is_empty() {
             let points = assign_children(&points);
             items.push(common::ui::MenuItem::under(copy::ASSIGN, &points));
@@ -838,11 +806,10 @@ pub(crate) fn partition_menu(
 
 /// Builds one planned partition's popup. A partition cut blank has nothing to
 /// keep and no container to open, so the popup formats it, assigns it or
-/// drops it. `boot` and `composefs` shape the Assign list as `assigns` does.
+/// drops it. `boot` shapes the Assign list as `assigns` does.
 pub(crate) fn created_menu(
     create: &Created,
     boot: bool,
-    composefs: bool,
 ) -> (Vec<common::ui::MenuItem>, Vec<PartAction>) {
     let points: Vec<&'static str> = copy::mount_points()
         .into_iter()
@@ -851,7 +818,6 @@ pub(crate) fn created_menu(
         // leaves it out.
         .filter(|target| *target != "/swap")
         .filter(|target| *target != "/boot" || boot)
-        .filter(|target| *target != "/var" || !composefs)
         .filter(|target| create.fstype.is_empty() || fits(target, &create.fstype))
         .collect();
     let mut items = Vec::new();
@@ -1061,7 +1027,7 @@ pub(crate) fn confirm_disk(disk: &DiskScan) -> Result<bool, String> {
 /// container takes the root's slot, so the plan is read unencrypted and the
 /// row mounted at `/` is counted. The ESP and any `/boot` come before it.
 pub(crate) fn container_number(payload: &Payload) -> usize {
-    let plan = automatic_rows(payload, "", None, false, false);
+    let plan = automatic_rows(payload, None, false);
     1 + plan
         .iter()
         .position(|(.., mount)| mount.as_str() == "/")
@@ -1462,7 +1428,7 @@ fn key_of(method: &str, passphrase: &str, path: &str) -> Key {
     }
 }
 
-/// Says what a manual layout still needs before fisherman can take it. The
+/// Says what a manual layout still needs before the installer can take it. The
 /// layout needs one root, one ESP, no mount point claimed twice, and no
 /// filesystem that cannot carry the point it holds. The editor lets the user
 /// build a half answered layout, so `short_of` runs this on every draw and
@@ -1474,15 +1440,47 @@ pub(crate) fn layout_short_of(
     reserve: u64,
 ) -> Option<String> {
     // A root below the image's reserve holds no installation. The disk would
-    // be cut, formatted and handed to fisherman, which then fails for no space
+    // be cut, formatted and handed to `bootc`, which then fails for no space
     // with the old partition table already gone. The floor is the reserve the
-    // automatic path's home answer already uses.
+    // automatic path already holds its own root to.
     if let Some(root) = layout
         .creates
         .iter()
         .find(|create| create.target == "/" && create.gb < reserve)
     {
         return Some(copy::custom_root_too_small(root.gb, reserve));
+    }
+    if layout
+        .mounts
+        .iter()
+        .any(|mount| mount.target == "/" && mount.fstype == "unformatted")
+    {
+        return Some(copy::CUSTOM_ROOT_KEPT.to_string());
+    }
+    // An existing partition answered as the root weighs against the same
+    // floor. The table the editor read gives its size.
+    if let Some(table) = table {
+        let kept = layout
+            .mounts
+            .iter()
+            .filter(|mount| mount.target == "/")
+            .map(|mount| mount.partition.as_str())
+            .chain(
+                layout
+                    .opens
+                    .iter()
+                    .filter(|open| open.target == "/")
+                    .map(|open| open.partition.as_str()),
+            );
+        for partition in kept {
+            let Some(slot) = table.slots.iter().find(|slot| slot.node == partition) else {
+                continue;
+            };
+            let gb = slot.sectors.saturating_mul(table.sector) / 1_000_000_000;
+            if gb < reserve {
+                return Some(copy::custom_root_too_small(gb, reserve));
+            }
+        }
     }
     // This weighs the whole plan against the room the disk has now. The
     // create window already refused a single oversized create as the user
@@ -1528,15 +1526,15 @@ pub(crate) fn layout_short_of(
             return Some(copy::CUSTOM_DUPLICATE.to_string());
         }
     }
-    // bootc installs its bootloader through the target's `/boot/efi`, and
-    // fisherman's automatic path always cuts one. A manual layout with no ESP
-    // leaves the machine no bootloader once the disk is rewritten.
+    // bootc installs its bootloader through the target's `/boot/efi`. The
+    // whole-disk layout cuts one. A manual layout with no ESP leaves the
+    // machine no bootloader once the disk is rewritten.
     if !targets.iter().any(|target| target == "/boot/efi") {
         return Some(copy::CUSTOM_ESP.to_string());
     }
-    // fisherman's `customMounts` carries no passphrase field yet, which 8G
-    // phase 2 adds. The recipe would be refused at fisherman's own validation
-    // after the user confirmed the install, so the editor refuses it here.
+    // The installer creates no container from a manual `luks` format.
+    // `mkfs_args` would refuse the format after the user confirmed the
+    // install, so the editor refuses it here.
     if layout.mounts.iter().any(|mount| mount.fstype == "luks") {
         return Some(copy::CUSTOM_LUKS_LATER.to_string());
     }

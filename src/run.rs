@@ -1,8 +1,11 @@
 use super::*;
 use std::io::{BufRead as _, Write as _};
 
-/// Completes the recipe and runs fisherman over it, drawing its event stream
-/// into a bounded region and writing all of it to a file.
+const TICK: std::time::Duration = std::time::Duration::from_millis(120);
+const STORAGE_CONF: &str = "/etc/containers/storage.conf";
+
+/// Prepares the disk and runs the payload's own bootc over it, drawing bootc's
+/// output into a bounded region and writing all of it to a file.
 ///
 /// A failed draw never fails the install, so no call here uses `?` on the
 /// region.
@@ -11,33 +14,37 @@ pub fn run(payload: &Payload, answers: &mut Answers, prompt: &Prompt) -> Result<
     // A TPM2 answer stages an enrolment the image performs on its own first
     // boot. This is the last moment before a write that can refuse an image
     // unable to perform it.
-    if answers.opened == Opened::Tpm2 {
+    if answers.opened == Opened::Tpm2 || answers.encryption.kind.starts_with("tpm2-") {
         require_tpm2_enrolment(&payload.image)?;
     }
-    // Every step that can fail for a reason the cut has nothing to do with
-    // runs first. `complete` parses the recipe and shells out to `openssl` for
-    // the password hash, and neither depends on the cut. A missing `openssl`
-    // or an unreadable recipe found after the cut would abort with the disk
-    // already repartitioned. This call throws its document away, because the
-    // created partitions carry no nodes yet and fisherman gets a later one.
-    // The call runs only to find those failures while the disk is untouched.
-    complete(&payload.recipe, answers)?;
-    // The cut is the first step that touches the disk. Every later step names
-    // devices the cut creates, and a container cannot open on a partition that
-    // is not there yet.
-    if let Some(layout) = answers.layout.as_mut() {
-        cut_partitions(layout)?;
+    validate_recipe(payload)?;
+    if !portable_name(&answers.user) {
+        return Err(copy::account_name(&answers.user));
     }
-    // The entries whose systems the plan deletes or formats go before
-    // fisherman writes the entries the image carries, so the ESP holds one
-    // set of entries and not two.
-    if let Some(layout) = answers.layout.as_ref() {
-        esp::remove(layout)?;
-    }
-    // Every container the layout opens stays open for the whole of fisherman.
-    // Every way out of this function closes them, including the panic path.
-    let _opened = open_volumes(answers.layout.as_ref())?;
-    let staged = stage(&complete(&payload.recipe, answers)?)?;
+    let password_hash = hashed(&answers.password)?;
+    // The disk stays cut, open and mounted until `prepared` drops, on every
+    // way out of this function, the panic path included.
+    let mut prepared = prepare(payload, answers)?;
+    let changes_table = prepared.layout.changes_table();
+    installed(payload, answers, prompt, &password_hash, &mut prepared).map_err(|why| {
+        match changes_table {
+            true => format!("{why}\n\n{}", copy::table_already_changed(&answers.disk)),
+            false => why,
+        }
+    })
+}
+
+/// Runs bootc over the prepared disk and writes the installed system. Every
+/// failure here comes after the cut, which `run` tells the user.
+fn installed(
+    payload: &Payload,
+    answers: &mut Answers,
+    prompt: &Prompt,
+    password_hash: &str,
+    prepared: &mut Prepared,
+) -> Result<(), String> {
+    let karg = root_luks_arg(&prepared.layout, &payload.boot)?;
+    let mut command = bootc_command(&payload.install, karg.as_deref());
     let (mut log, at) = open_log(payload);
     // Printed only where no widget draws. On the installer's own screen this
     // line would land above the box and stay there, because a bounded region
@@ -51,27 +58,28 @@ pub fn run(payload: &Payload, answers: &mut Answers, prompt: &Prompt) -> Result<
             copy::logging(at.as_deref())
         );
     }
-    // One pipe carries both streams, so fisherman's stderr arrives as an
-    // event like the rest. An inherited stderr would print straight onto the
-    // drawn region.
-    let (events, writer) = std::io::pipe().map_err(|err| format!("{BACKEND}: {err}"))?;
-    let errors = writer
-        .try_clone()
-        .map_err(|err| format!("{BACKEND}: {err}"))?;
-    let mut child = Command::new(BACKEND)
-        .arg(&staged.0)
+    // One pipe carries both streams, so bootc's stderr arrives with stdout.
+    // An inherited stderr would print straight onto the drawn region.
+    let (events, writer) = std::io::pipe().map_err(|err| format!("podman: {err}"))?;
+    let errors = writer.try_clone().map_err(|err| format!("podman: {err}"))?;
+    let mut child = command
         .stdout(Stdio::from(writer))
         .stderr(Stdio::from(errors))
         .spawn()
-        .map_err(|err| format!("{BACKEND}: {err}"))?;
+        .map_err(|err| format!("podman: {err}, and it is what runs bootc"))?;
+    // `Command` keeps its configured descriptors after `spawn`, so retaining
+    // it would keep the read loop open after podman exits.
+    drop(command);
     let mut region = match prompt.draws() {
         true => common::ui::Progress::open(&copy::writing(at.as_deref())).ok(),
         false => None,
     };
-    let mut recovery = None;
+    if let Some(region) = &mut region {
+        let _ = region.step(0, 100, "Installing the operating system");
+    }
     {
         // A thread reads the pipe and this takes lines with a timeout, so the
-        // region keeps drawing while fisherman is silent. A step can hold the
+        // region keeps drawing while bootc is silent. A step can hold the
         // machine for minutes between two messages. Both write ends moved into
         // the child, so the read ends when the child ends, and this loop with
         // it.
@@ -97,55 +105,41 @@ pub fn run(payload: &Payload, answers: &mut Answers, prompt: &Prompt) -> Result<
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             };
-            let event = Event::of(&line);
-            if let Event::Recovery(key) = &event {
-                recovery = Some(key.clone());
-            }
-            if let (Some(said), Some(log)) = (event.logged(), &mut log) {
-                let _ = writeln!(log, "{said}");
+            if let Some(log) = &mut log {
+                let _ = writeln!(log, "{line}");
             }
             match &mut region {
-                None => println!("{}", event.say()),
+                None => println!("{line}"),
                 Some(region) => {
-                    let _ = match &event {
-                        Event::Step(pct, flight, what) => region.step(*pct, *flight, what),
-                        Event::Done(message) => region.step(100, 0, message),
-                        // Held back until the region closes. The recovery key
-                        // is the one line on this screen worth reading
-                        // twice.
-                        Event::Recovery(_) => Ok(()),
-                        Event::Note(message) => region.note(message),
-                        Event::Other(line) => region.note(line),
-                    };
+                    let _ = region.note(&line);
                 }
             }
         }
     }
-    let finished = child.wait().map_err(|err| format!("{BACKEND}: {err}"));
-    if let Some(region) = region {
+    let finished = child.wait().map_err(|err| format!("podman: {err}"));
+    if let Some(mut region) = region {
+        if finished.as_ref().is_ok_and(|status| status.success()) {
+            let _ = region.step(100, 0, "Operating system installed");
+        }
         region.close();
     }
-    // The staged recipe carries the password hash and the passphrase, and the
-    // install is over. Dropping it here rather than at the end of `run` keeps
-    // the recipe from outliving fisherman while the menu is rendered.
-    drop(staged);
     let status = finished?;
     if !status.success() {
         return Err(format!(
-            "{BACKEND} did not finish: {status}, and {}",
+            "bootc did not finish: {status}, and {}",
             copy::logging(at.as_deref())
         ));
     }
     // The containers the layout opened must open again on the installed
     // machine, and no other step arranges that on the path the user chose.
-    // This runs before the menu, because the menu bakes the BLS options in.
-    let notes = arrange(payload, answers)?;
+    let notes = arrange(payload, answers, &prepared.layout, password_hash)?;
     configure_boot_chain(&payload.image, &answers.disk, &payload.boot)?;
     render_menu(&payload.image, &answers.disk)?;
     // The steps the last screen asks for are read from the firmware now
     // rather than from the form's panel. A key enrolled while the install ran
     // changes them.
     let steps = next_steps(&payload.boot, &firmware(payload));
+    let recovery = prepared.recovery.take();
     let volumes = match recovery.is_some() {
         true => recovery_volumes(answers),
         false => Vec::new(),
@@ -167,10 +161,112 @@ pub fn run(payload: &Payload, answers: &mut Answers, prompt: &Prompt) -> Result<
     )
 }
 
+/// Refuses missing host paths, and an image the stores lack, before the
+/// installer changes the partition table. The install runs with `--pull=never`,
+/// so a missing image would otherwise stop it after the cut.
+fn validate_recipe(payload: &Payload) -> Result<(), String> {
+    if !Path::new(STORAGE_CONF).is_file() {
+        return Err(format!(
+            "{STORAGE_CONF}: missing, and bootc needs it to read the media store"
+        ));
+    }
+    for store in &payload.install.stores {
+        if !store.starts_with('/') || store.contains(':') || !Path::new(store).is_dir() {
+            return Err(format!(
+                "{}: `additionalImageStores` names unusable path {store:?}",
+                payload.recipe.display()
+            ));
+        }
+    }
+    // The output is captured, because an inherited stderr would print onto
+    // the drawn region.
+    let held = Command::new("podman")
+        .args(["image", "exists", &payload.install.image])
+        .output()
+        .map_err(|err| format!("podman: {err}, and it is what reads the media store"))?;
+    match held.status.code() {
+        Some(0) => Ok(()),
+        Some(1) => Err(format!(
+            "no store {STORAGE_CONF} names holds {}",
+            payload.install.image
+        )),
+        _ => Err(format!(
+            "podman could not read the stores {STORAGE_CONF} names: {}",
+            String::from_utf8_lossy(&held.stderr).trim()
+        )),
+    }
+}
+
+pub(crate) fn bootc_command(recipe: &InstallRecipe, karg: Option<&str>) -> Command {
+    let mut command = Command::new("podman");
+    command.args([
+        "run",
+        "--rm",
+        "--pull=never",
+        "--privileged",
+        "--pid=host",
+        "--security-opt",
+        "label=disable",
+        "-v",
+        "/dev:/dev",
+        "-v",
+        "/var/lib/containers:/var/lib/containers",
+    ]);
+    for store in &recipe.stores {
+        command.args(["-v", &format!("{store}:{store}:ro")]);
+    }
+    command.args([
+        "-v",
+        &format!("{STORAGE_CONF}:{STORAGE_CONF}:ro"),
+        "-v",
+        &format!("{SYSROOT}:/target"),
+        &recipe.image,
+        "bootc",
+        "install",
+        "to-filesystem",
+        "--skip-finalize",
+        "--target-imgref",
+        &recipe.target_imgref,
+    ]);
+    if recipe.composefs {
+        command.arg("--composefs-backend");
+    }
+    if !recipe.bootloader.is_empty() && recipe.bootloader != "grub2" {
+        command.args(["--bootloader", &recipe.bootloader]);
+    }
+    if recipe.generic {
+        command.arg("--generic-image");
+    }
+    if let Some(karg) = karg {
+        command.args(["--karg", karg]);
+    }
+    command.arg("/target");
+    command
+}
+
+/// Gives bootc the root container before it writes the BLS entry. A signed UKI
+/// finds its root by partition type and carries no mutable kernel command line.
+fn root_luks_arg(layout: &CustomLayout, boot: &str) -> Result<Option<String>, String> {
+    if !boot.is_empty() {
+        return Ok(None);
+    }
+    let Some((name, open)) = layout
+        .mappers()
+        .into_iter()
+        .find(|(_, open)| open.target == "/")
+    else {
+        return Ok(None);
+    };
+    Ok(Some(format!(
+        "rd.luks.name={}={name}",
+        luks_uuid(&open.partition)?
+    )))
+}
+
 /// Lists what a recovery key opens, so a photograph of the screen names the
 /// disk. The list carries the install disk and every partition the layout
-/// chose to open. Fisherman makes the automatic layout's root, so on that path
-/// the disk is the only device this side knows.
+/// chose to open. `Prepared` holds an automatic layout, so on that path the
+/// answers name only the disk.
 fn recovery_volumes(answers: &Answers) -> Vec<String> {
     let mut volumes = vec![format!("{}: {}", copy::ENCRYPTED_DISK, answers.disk)];
     if let Some(layout) = &answers.layout {

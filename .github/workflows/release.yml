@@ -112,7 +112,7 @@ jobs:
           # still exits 0.
           tar -czf "$asset" -C target/dist tect-installer
           # Bare hex, because this is the value the media pins as a build
-          # argument beside its fisherman and tacklebox pins. Nothing pipes
+          # argument beside its tacklebox pin. Nothing pipes
           # this file into `sha256sum -c`, which rejects a line with no
           # filename on it.
           sha256sum "$asset" | cut -d' ' -f1 > "${asset}.sha256"

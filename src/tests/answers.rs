@@ -63,74 +63,6 @@ fn a_created_partition_answers_the_same_rules() {
     );
 }
 
-/// A planned partition takes the `/swap` translation on its own branch in
-/// `complete`, so this case covers that branch as well as the node.
-#[test]
-fn a_created_partition_reaches_the_recipe_as_the_node_it_got() {
-    let mut layout = CustomLayout::empty("/dev/vda");
-    layout.creates = vec![
-        Created {
-            gb: 2,
-            target: "/boot/efi".to_string(),
-            fstype: "fat32".to_string(),
-            device: "/dev/vda1".to_string(),
-            ..Default::default()
-        },
-        Created {
-            gb: 8,
-            target: "/swap".to_string(),
-            fstype: "swap".to_string(),
-            device: "/dev/vda2".to_string(),
-            ..Default::default()
-        },
-    ];
-    let root = scratch("created-recipe");
-    let recipe = root.join(RECIPE);
-    std::fs::write(&recipe, EMITTED).expect("a recipe");
-    let answers = Answers {
-        disk: "/dev/vda".to_string(),
-        hostname: "deb2".to_string(),
-        user: "tect".to_string(),
-        password: "hunter2".to_string(),
-        opened: Opened::Keep,
-        encryption: Encryption {
-            kind: NONE.to_string(),
-            passphrase: String::new(),
-            pin: String::new(),
-        },
-        data: Data::default(),
-        layout: Some(layout),
-    };
-    let done = complete(&recipe, &answers).expect("a created-partition recipe");
-    let mounts = json::items(&done, "customMounts");
-    let said: Vec<(String, String, String)> = mounts
-        .iter()
-        .map(|mount| {
-            (
-                json::text(mount, "partition").unwrap_or_default(),
-                json::text(mount, "target").unwrap_or_default(),
-                json::text(mount, "fstype").unwrap_or_default(),
-            )
-        })
-        .collect();
-    assert!(
-        said.contains(&(
-            "/dev/vda1".to_string(),
-            "/boot/efi".to_string(),
-            "fat32".to_string()
-        )),
-        "{said:?}"
-    );
-    assert!(
-        said.contains(&(
-            "/dev/vda2".to_string(),
-            "swap".to_string(),
-            "swap".to_string()
-        )),
-        "{said:?}"
-    );
-}
-
 /// A layout that cleared the whole disk once summarised as an empty list,
 /// under a sentence about formatting. This case guards that regression.
 #[test]
@@ -147,7 +79,6 @@ fn the_confirmation_names_every_partition_it_will_remove() {
             passphrase: String::new(),
             pin: String::new(),
         },
-        data: Data::default(),
         layout: Some(CustomLayout {
             disk: "/dev/sda".to_string(),
             // Clearing the disk is what leaves the mounts and the opens empty.
@@ -207,36 +138,40 @@ fn the_confirmation_names_every_partition_it_will_remove() {
     assert!(copy::removing_partitions("/dev/sda", 1).starts_with("DELETE 1 partition "));
 }
 
-/// The recipe carries the PIN in its own field. The passphrase stays empty,
-/// because fisherman generates this kind's recovery key itself.
+/// The install erases the old system inside an opened root, so the summary
+/// the user agrees to says so beside how the container opens at boot.
 #[test]
-fn the_completed_recipe_carries_the_pin() {
-    let root = scratch("complete-pin");
-    let recipe = root.join(RECIPE);
-    std::fs::write(&recipe, EMITTED).expect("a recipe");
+fn the_confirmation_names_the_format_inside_an_opened_root() {
+    let payload = a_payload();
     let answers = Answers {
-        disk: "/dev/vda".to_string(),
+        disk: "/dev/sda".to_string(),
         hostname: "deb2".to_string(),
         user: "tect".to_string(),
         password: "hunter2".to_string(),
         opened: Opened::Keep,
         encryption: Encryption {
-            kind: "tpm2-luks-pin".to_string(),
+            kind: NONE.to_string(),
             passphrase: String::new(),
-            pin: "4321".to_string(),
+            pin: String::new(),
         },
-        data: Data::default(),
-        layout: None,
+        layout: Some(CustomLayout {
+            disk: "/dev/sda".to_string(),
+            opens: vec![LuksOpen {
+                partition: "/dev/sda3".to_string(),
+                target: "/".to_string(),
+                key: Key::Passphrase("opensesame".to_string()),
+            }],
+            ..Default::default()
+        }),
     };
-    let done = complete(&recipe, &answers).expect("the person's half goes in");
-    let encryption = json::field(&done, "encryption").expect("an encryption");
-    assert_eq!(
-        json::text(encryption, "type").as_deref(),
-        Some("tpm2-luks-pin")
+    let said = answers.summary(&payload);
+    assert!(
+        said.contains(&(
+            "/".to_string(),
+            copy::opened_root("/dev/sda3", &payload.filesystem, copy::BOOT_PASSPHRASE)
+        )),
+        "{said:?}"
     );
-    assert_eq!(json::text(encryption, "pin").as_deref(), Some("4321"));
-    assert_eq!(json::text(encryption, "passphrase").as_deref(), Some(""));
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// The editor lets the user leave a layout half answered, so the gate reads
@@ -289,75 +224,6 @@ fn custom_layouts_need_one_root_and_unique_mount_points() {
     );
 }
 
-/// A container the user opened reaches fisherman as its `/dev/mapper` name.
-/// The layout numbers the mappers in the order it opens them.
-#[test]
-fn an_opened_container_reaches_fisherman_as_its_mapper() {
-    let root = scratch("opened-layout");
-    let recipe = root.join(RECIPE);
-    std::fs::write(&recipe, EMITTED).expect("a recipe");
-    let answers = Answers {
-        disk: "/dev/vda".to_string(),
-        hostname: "deb2".to_string(),
-        user: "tect".to_string(),
-        password: "hunter2".to_string(),
-        opened: Opened::Keep,
-        encryption: Encryption {
-            kind: NONE.to_string(),
-            passphrase: String::new(),
-            pin: String::new(),
-        },
-        data: Data::default(),
-        layout: Some(CustomLayout {
-            disk: "/dev/vda".to_string(),
-            mounts: vec![CustomMount {
-                partition: "/dev/vda1".to_string(),
-                target: "/boot/efi".to_string(),
-                fstype: "unformatted".to_string(),
-
-                passphrase: String::new(),
-            }],
-            opens: vec![
-                LuksOpen {
-                    partition: "/dev/vda2".to_string(),
-                    target: "/".to_string(),
-                    key: Key::Passphrase("opensesame".to_string()),
-                },
-                LuksOpen {
-                    partition: "/dev/vda3".to_string(),
-                    target: "/var".to_string(),
-                    key: Key::File(PathBuf::from("/run/keyfile")),
-                },
-            ],
-            ..Default::default()
-        }),
-    };
-    let done = complete(&recipe, &answers).expect("a custom recipe");
-    let mounts = json::items(&done, "customMounts");
-    assert_eq!(mounts.len(), 3);
-    assert_eq!(
-        json::text(&mounts[1], "partition").as_deref(),
-        Some("/dev/mapper/tect-1")
-    );
-    assert_eq!(json::text(&mounts[1], "target").as_deref(), Some("/"));
-    assert_eq!(
-        json::text(&mounts[1], "fstype").as_deref(),
-        Some("unformatted")
-    );
-    assert_eq!(
-        json::text(&mounts[2], "partition").as_deref(),
-        Some("/dev/mapper/tect-2")
-    );
-    assert_eq!(json::text(&mounts[2], "target").as_deref(), Some("/var"));
-    // The installer holds the container device and the key. Neither reaches
-    // the recipe.
-    let said = done.render();
-    for secret in ["/dev/vda2", "/dev/vda3", "opensesame", "/run/keyfile"] {
-        assert!(!said.contains(secret), "{secret} reached the recipe");
-    }
-    let _ = std::fs::remove_dir_all(&root);
-}
-
 /// A `Debug` print of a key masks the secret, so a panic message or a test
 /// failure never carries it. A key read out of an old system masks the same
 /// way.
@@ -367,74 +233,6 @@ fn a_passphrase_never_reads_back_out_of_a_key() {
     assert!(!said.contains("opensesame"), "{said}");
     let said = format!("{:?}", Key::Data(b"opensesame".to_vec()));
     assert!(!said.contains("opensesame"), "{said}");
-}
-
-#[test]
-fn a_custom_layout_is_the_recipe_fisherman_takes() {
-    let root = scratch("custom-layout");
-    let recipe = root.join(RECIPE);
-    let emitted = EMITTED.replace(
-        "\"user\": { \"groups\": [\"sudo\"] },",
-        "\"user\": { \"groups\": [\"sudo\"] },\n  \"varDisk\": { \"size\": \"20 GB\" },",
-    );
-    std::fs::write(&recipe, emitted).expect("a recipe");
-    let answers = Answers {
-        disk: "/dev/vda".to_string(),
-        hostname: "deb2".to_string(),
-        user: "tect".to_string(),
-        password: "hunter2".to_string(),
-        opened: Opened::Keep,
-        encryption: Encryption {
-            kind: NONE.to_string(),
-            passphrase: String::new(),
-            pin: String::new(),
-        },
-        data: Data::default(),
-        layout: Some(CustomLayout {
-            disk: "/dev/vda".to_string(),
-            mounts: vec![
-                CustomMount {
-                    partition: "/dev/vda1".to_string(),
-                    target: "/boot/efi".to_string(),
-                    fstype: "unformatted".to_string(),
-
-                    passphrase: String::new(),
-                },
-                CustomMount {
-                    partition: "/dev/vda2".to_string(),
-                    target: "/".to_string(),
-                    fstype: "ext4".to_string(),
-
-                    passphrase: String::new(),
-                },
-                CustomMount {
-                    partition: "/dev/vda3".to_string(),
-                    target: "/swap".to_string(),
-                    fstype: "swap".to_string(),
-
-                    passphrase: String::new(),
-                },
-            ],
-            opens: Vec::new(),
-            ..Default::default()
-        }),
-    };
-    let done = complete(&recipe, &answers).expect("a custom recipe");
-    let mounts = json::items(&done, "customMounts");
-    assert_eq!(mounts.len(), 3);
-    assert_eq!(
-        json::text(&mounts[0], "partition").as_deref(),
-        Some("/dev/vda1")
-    );
-    assert_eq!(
-        json::text(&mounts[0], "fstype").as_deref(),
-        Some("unformatted")
-    );
-    assert_eq!(json::text(&mounts[1], "target").as_deref(), Some("/"));
-    // Fisherman knows a swap partition by the target `swap`.
-    assert_eq!(json::text(&mounts[2], "target").as_deref(), Some("swap"));
-    assert!(json::field(&done, "varDisk").is_none());
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// Every rung of the key ladder is covered here, because a rung that answers

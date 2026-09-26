@@ -43,6 +43,7 @@ fn the_panel_states_the_firmware_and_what_the_image_needs() {
     use common::ui::HeaderLine;
     let payload = |boot: &str| Payload {
         recipe: "/mnt/tect/install-recipe.json".into(),
+        install: an_install_recipe(),
         image: "ghcr.io/tectonic-os/deb2:latest".to_string(),
         hostname: "deb2".to_string(),
         filesystem: "ext4".to_string(),

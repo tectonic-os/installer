@@ -13,18 +13,13 @@ pub(crate) const ROW_LAYOUT: usize = 4;
 /// Answers what opens the root. A manual layout that opens containers
 /// replaces this row with the per-container answer.
 pub(crate) const ROW_ENCRYPTION: usize = 5;
-/// Asks whether the home area gets a partition of its own. The size row
-/// under it is asked only when the user answers yes.
-pub(crate) const ROW_DATA: usize = 6;
-pub(crate) const ROW_SIZE: usize = 7;
-/// Draws the disk table under the answers above it. `chosen_disk` reads the
-/// chosen disk row back from this field.
-pub(crate) const ROW_TABLE: usize = 8;
+/// Draws the disk table under the answers above it.
+pub(crate) const ROW_TABLE: usize = 6;
 /// Stays out of the drawn rows, because the encryption window writes it.
-pub(crate) const ROW_PASSPHRASE: usize = 9;
+pub(crate) const ROW_PASSPHRASE: usize = 7;
 /// Stays out of the drawn rows as well. `Answers::of` reads it back only for
 /// a `tpm2-luks-pin` install.
-pub(crate) const ROW_PIN: usize = 10;
+pub(crate) const ROW_PIN: usize = 8;
 
 /// Returns the layout the form's layout row says is held. A `manual` answer
 /// always holds one for this disk, even with nothing answered in it. A
@@ -46,22 +41,16 @@ pub(crate) fn held_pick(
 
 /// Lists the rows the form asks. The encryption window owns the passphrase
 /// and the PIN, so neither row is asked here. A manual layout answers its own
-/// encryption and home rows, so the whole-disk rows drop out of the list. The
-/// size row is asked only when the user answers a separate home partition.
+/// encryption per container, so the whole-disk encryption row drops out of
+/// the list unless a container is open.
 pub(crate) fn asked(fields: &[common::ui::Field]) -> Vec<usize> {
     let manual = fields[ROW_LAYOUT].value() == copy::LAYOUT_MANUAL;
     // A manual layout whose containers are open keeps its encryption row.
     // The row then holds what the container headers answer.
     let opens = matches!(fields[ROW_ENCRYPTION], common::ui::Field::Pick { .. });
-    let sized = fields[ROW_DATA].value() == copy::DATA_SEPARATE;
     (0..fields.len())
         .filter(|row| *row != ROW_PASSPHRASE && *row != ROW_PIN)
-        .filter(|row| {
-            !manual
-                || (*row != ROW_ENCRYPTION && *row != ROW_DATA && *row != ROW_SIZE)
-                || (opens && *row == ROW_ENCRYPTION)
-        })
-        .filter(|row| manual || *row != ROW_SIZE || sized)
+        .filter(|row| !manual || *row != ROW_ENCRYPTION || opens)
         .collect()
 }
 
@@ -117,7 +106,7 @@ pub(crate) fn short_of(
         // A key addition needs an encrypted root. A TPM2 token staged beside
         // a plain root would sit readable, and a key file on a data volume
         // would have nowhere to be read from. Turning the root back to a
-        // plain mount refuses here, before fisherman writes the disk.
+        // plain mount refuses here, before the installer writes the disk.
         if !layout.opens_the_root() && Opened::of(&at(ROW_ENCRYPTION)) != Opened::Keep {
             return Some(copy::OPENED_KEYFILE_PLAIN.to_string());
         }
@@ -146,21 +135,9 @@ pub(crate) fn short_of(
     if kind.starts_with("tpm2") && !tpm {
         return Some(copy::NO_TPM.to_string());
     }
-    // A home size the disk cannot hold is refused here, before sfdisk
-    // repartitions the disk. The room is measured against the plan's own disk
-    // row, less the 2 GB ESP, the 2 GB `/boot` a GRUB target wants and the
-    // root's reserve. The refusal tells the user to keep home on the root.
-    if !manual && at(ROW_DATA) == copy::DATA_SEPARATE && !at(ROW_SIZE).is_empty() {
-        if let (Some((disk, disk_gb)), Some(home)) = (chosen_disk(fields), size_gb(&at(ROW_SIZE))) {
-            if home < 1 {
-                return Some(copy::home_too_small(&copy::size_said(&at(ROW_SIZE))));
-            }
-            let boot = u64::from(payload.bootloader != "systemd") * 2;
-            let room = disk_gb.saturating_sub(2 + boot + payload.reserve_gb());
-            if home > room {
-                return Some(copy::home_too_big(&copy::size_said(&at(ROW_SIZE)), &disk));
-            }
-        }
+    let account = at(ROW_ACCOUNT);
+    if !account.is_empty() && !portable_name(&account) {
+        return Some(copy::account_name(&account));
     }
     let wants = Encryption::wants_passphrase(kind);
     let wants_pin = Encryption::wants_pin(kind);
@@ -178,10 +155,6 @@ pub(crate) fn short_of(
         // An `--encryption tpm2-luks-pin` flag with no `--pin` seeds a drawn
         // form, which never opens the window that would otherwise refuse it.
         (wants_pin && at(ROW_PIN).is_empty(), copy::ROW_PIN),
-        (
-            !manual && at(ROW_DATA) == copy::DATA_SEPARATE && at(ROW_SIZE).is_empty(),
-            copy::ROW_SIZE,
-        ),
     ]
     .into_iter()
     .filter(|(missing, _)| *missing)
@@ -191,18 +164,4 @@ pub(crate) fn short_of(
         true => None,
         false => Some(copy::still_needs(&missing)),
     }
-}
-
-/// Reads back the disk row the user chose, as the size the plan table draws
-/// and as that size in whole GB. It returns `None` before the user chooses a
-/// disk, and `None` where the disk field is not a table.
-fn chosen_disk(fields: &[common::ui::Field]) -> Option<(String, u64)> {
-    let common::ui::Field::Table { rows, .. } = &fields[ROW_TABLE] else {
-        return None;
-    };
-    let row = rows
-        .iter()
-        .find(|row| row.first().is_some_and(|cell| cell.answered()))?;
-    let size = row.get(1)?;
-    Some((size.text().to_string(), size_gb(size.text())?))
 }

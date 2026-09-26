@@ -339,11 +339,10 @@ pub(crate) fn remove(layout: &CustomLayout) -> Result<(), String> {
         let at = mount_rw(&removal.partition, &mut mounts)?;
         let efi = at.join("EFI");
         for entry in &removal.entries {
-            remove_vendor(&efi, entry)
-                .map_err(|why| format!("{why}\n\n{}", copy::table_already_changed(&layout.disk)))?;
+            remove_vendor(&efi, entry)?;
         }
-        // The unmount reports its failure, because the install stops here and
-        // the next step is fisherman over a disk this process still holds.
+        // The unmount reports its failure, because the next steps of the
+        // install format and mount partitions on this disk.
         mounts.release(&at)?;
     }
     Ok(())

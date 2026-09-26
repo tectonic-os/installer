@@ -1,9 +1,9 @@
 use super::*;
 
-/// The automatic layout's root is the partition fisherman retags for GPT
-/// auto-discovery, and the credential goes to the partition systemd-stub
-/// boots from. A second match leaves no single one, and a listing with no
-/// match leaves none at all.
+/// The automatic layout's root is the partition `retag_root` types for GPT
+/// auto-discovery. The credential goes to the partition systemd-stub boots
+/// from. A second match leaves no single one, and a listing with no match
+/// leaves none at all.
 #[test]
 fn a_partition_type_names_its_partitions() {
     let listed = "\
@@ -46,15 +46,14 @@ fn answers(kind: &str, passphrase: &str) -> Answers {
             passphrase: passphrase.to_string(),
             pin: String::new(),
         },
-        data: Data::default(),
         layout: None,
         opened: Opened::Keep,
     }
 }
 
 /// The kinds that stage a first-boot enrolment are the ones whose completion
-/// screen offers to finalize. The recovery key of a generated kind arrives as
-/// an event, and the passphrase kind carries its own.
+/// screen offers to finalize. `layout::seal` generates the recovery key of a
+/// `tpm2-luks` kind. The passphrase kind carries its own key.
 #[test]
 fn only_a_staged_enrolment_has_a_key_to_finalize_with() {
     let no_event = unlocking_key(&answers("tpm2-luks", ""), None);

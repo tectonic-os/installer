@@ -628,11 +628,13 @@ pub(crate) fn drawn_slots(parts: &[Partition], deletes: &[String]) -> Vec<usize>
 /// finish and leave the machine unable to boot. `U` and `L` are `sfdisk`'s own
 /// shorthands, checked 2026-09-19 to expand to
 /// `C12A7328-F81F-11D2-BA4B-00A0C93EC93B` and
-/// `0FC63DAF-8483-4772-8E79-3D69D8477DE4`.
-pub(crate) fn created_type(target: &str) -> &'static str {
-    match target {
-        "/boot/efi" => "U",
-        _ => "L",
+/// `0FC63DAF-8483-4772-8E79-3D69D8477DE4`. The cut types a discoverable root
+/// `ROOT_GUID`, which an initrd with no `root=` argument searches for.
+pub(crate) fn created_type(create: &Created) -> &'static str {
+    match (create.discoverable, create.target.as_str()) {
+        (true, _) => ROOT_GUID,
+        (false, "/boot/efi") => "U",
+        (false, _) => "L",
     }
 }
 
@@ -645,7 +647,7 @@ pub(crate) fn created_type(target: &str) -> &'static str {
 /// every later step names devices that do not exist until this returns. A
 /// layout that planned no delete, no create and no rename runs no `sfdisk`.
 pub(crate) fn cut_partitions(layout: &mut CustomLayout) -> Result<(), String> {
-    if layout.deletes.is_empty() && layout.creates.is_empty() && layout.renames.is_empty() {
+    if !layout.changes_table() {
         return Ok(());
     }
     let _lock = DiskLock::take(&layout.disk)?;
@@ -680,7 +682,7 @@ pub(crate) fn cut_partitions(layout: &mut CustomLayout) -> Result<(), String> {
 /// against a file-backed table, which grows no nodes, so the table it wrote
 /// is the whole of what it did.
 pub(crate) fn apply_cuts(layout: &CustomLayout) -> Result<Vec<usize>, String> {
-    if layout.deletes.is_empty() && layout.creates.is_empty() && layout.renames.is_empty() {
+    if !layout.changes_table() {
         return Ok(Vec::new());
     }
     // The table is read before any write, because the editor screen predicted
@@ -757,7 +759,7 @@ pub(crate) fn apply_cuts(layout: &CustomLayout) -> Result<Vec<usize>, String> {
                 format!(
                     "start={start}, size={}GB, type={}{name}\n",
                     create.gb,
-                    created_type(&create.target)
+                    created_type(create)
                 )
             })
             .collect();
@@ -791,11 +793,11 @@ pub(crate) fn check_created_slots(
     after: &DiskTable,
 ) -> Result<(), String> {
     for (create, number) in layout.creates.iter().zip(numbers) {
-        // Measured 2026-09-19, a `dos` label with four primaries takes a
-        // fifth `--append`, exits 0 and writes no partition. The recipe would
-        // then name a partition that is not there, so a missing slot fails
-        // here. `cut_partitions` catches the missing node too, and the
-        // file-backed path this function also serves has no node to wait for.
+        // On a `dos` label with four primaries, a fifth `sfdisk --append` exits
+        // 0 and writes no partition. The layout would then format and mount a
+        // partition that is not there, so a missing slot fails here.
+        // `cut_partitions` catches the missing node too, and the file-backed
+        // path this function also serves has no node to wait for.
         let Some(slot) = after.slots.iter().find(|slot| slot.number == *number) else {
             return Err(format!(
                 "partition {number} is not in the partition table the cut \

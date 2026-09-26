@@ -38,3 +38,26 @@ fn opening_a_container_names_cryptsetup_and_the_mapper() {
         ["-q", "luksOpen", "--key-file", "-", "/dev/vda2", "tect-1"]
     );
 }
+
+/// The key reaches `luksFormat` on stdin, so it never reaches the process
+/// list. The container is LUKS2, which the TPM2 token needs.
+#[test]
+fn a_new_container_takes_its_key_on_stdin() {
+    let command = format_command("/dev/vda3");
+    let args: Vec<String> = command
+        .get_args()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        args,
+        [
+            "-q",
+            "luksFormat",
+            "--type",
+            "luks2",
+            "--key-file",
+            "-",
+            "/dev/vda3"
+        ]
+    );
+}

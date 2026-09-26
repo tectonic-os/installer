@@ -242,10 +242,42 @@ impl Mounts {
     }
 }
 
+impl Mounts {
+    /// Records the mount for `Drop`.
+    pub(crate) fn mount(&mut self, device: &str, at: &Path) -> Result<(), String> {
+        std::fs::create_dir_all(at).map_err(|err| format!("{}: {err}", at.display()))?;
+        let out = Command::new("mount")
+            .arg(device)
+            .arg(at)
+            .output()
+            .map_err(|err| format!("mount: {err}, and it is what writes {device}"))?;
+        if !out.status.success() {
+            return Err(format!(
+                "mounting {device}: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        self.0.push(at.to_path_buf());
+        Ok(())
+    }
+}
+
+/// Unmounts the newest mount first, because a later mount can sit under an
+/// earlier one.
 impl Drop for Mounts {
     fn drop(&mut self) {
-        for at in &self.0 {
-            let _ = Command::new("umount").arg(at).status();
+        for at in self.0.iter().rev() {
+            if let Err(why) = Command::new("umount")
+                .arg(at)
+                .output()
+                .map_err(|err| err.to_string())
+                .and_then(|out| match out.status.success() {
+                    true => Ok(()),
+                    false => Err(String::from_utf8_lossy(&out.stderr).trim().to_string()),
+                })
+            {
+                eprintln!("{PROGRAM}: {} is still mounted: {why}", at.display());
+            }
         }
     }
 }
@@ -287,19 +319,7 @@ fn mount_ro(device: &Path, fstype: &str, mounts: &mut Mounts) -> Result<PathBuf,
 /// removing an ESP entry whose system the plan replaces.
 pub(crate) fn mount_rw(device: &str, mounts: &mut Mounts) -> Result<PathBuf, String> {
     let at = mounts_root().join(format!("write-{}", mounts.0.len() + 1));
-    std::fs::create_dir_all(&at).map_err(|err| format!("{}: {err}", at.display()))?;
-    let out = Command::new("mount")
-        .arg(device)
-        .arg(&at)
-        .output()
-        .map_err(|err| format!("mount: {err}, and it is what writes {device}"))?;
-    if !out.status.success() {
-        return Err(format!(
-            "mounting {device}: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
-    }
-    mounts.0.push(at.clone());
+    mounts.mount(device, &at)?;
     Ok(at)
 }
 

@@ -84,8 +84,8 @@ pub(crate) fn unlocking_key(answers: &Answers, recovery: Option<&str>) -> Option
         return Some((open.key.clone(), false));
     }
     match answers.encryption.kind.as_str() {
-        // fisherman generates the recovery key of both kinds and reports it
-        // once, on the completion screen.
+        // `layout::seal` generates the recovery key of both kinds. The
+        // completion screen shows the key once.
         "tpm2-luks" | "tpm2-luks-pin" => recovery.map(|key| {
             (
                 Key::Passphrase(key.to_string()),
@@ -101,8 +101,8 @@ pub(crate) fn unlocking_key(answers: &Answers, recovery: Option<&str>) -> Option
 }
 
 /// Names the encrypted root the one-time key is added to. A layout names its
-/// root outright. The automatic layout's root is the partition fisherman
-/// retags for the sealed UKI's GPT auto-discovery.
+/// root outright. The automatic layout's root is the partition `retag_root`
+/// types for the sealed UKI's GPT auto-discovery.
 pub(crate) fn encrypted_root(answers: &Answers) -> Result<String, String> {
     if let Some(layout) = &answers.layout {
         let open = layout

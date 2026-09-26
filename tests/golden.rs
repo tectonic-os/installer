@@ -272,7 +272,8 @@ fn a_second_installer_is_refused_while_the_first_holds_the_screen() {
   "filesystem": "ext4",
   "luksInitramfs": true,
   "hostname": "deb2",
-  "user": { "groups": ["sudo"] }
+  "user": { "groups": ["sudo"] },
+  "additionalImageStores": ["/var/lib/tectonic/store"]
 }
 "#,
     )
@@ -360,7 +361,8 @@ fn install_screens() {
   "filesystem": "ext4",
   "luksInitramfs": true,
   "hostname": "deb2",
-  "user": { "groups": ["sudo"] }
+  "user": { "groups": ["sudo"] },
+  "additionalImageStores": ["/var/lib/tectonic/store"]
 }
 "#,
     )
@@ -550,10 +552,10 @@ esac
             // on its own. The walk moves down to it and takes it, which draws
             // the missing answers, and then comes back up. Typing enters a
             // field, so the walk changes rows with the arrow keys.
-            b"\x1b[B", b"\x1b[B", b"\x1b[B", b"\x1b[B", b"\x1b[B", b"\x1b[B", b"\x1b[B",
+            b"\x1b[B", b"\x1b[B", b"\x1b[B", b"\x1b[B", b"\x1b[B", b"\x1b[B",
             b"\x1b[B",
             b"\r",
-            b"\x1b[A", b"\x1b[A", b"\x1b[A", b"\x1b[A", b"\x1b[A", b"\x1b[A", b"\x1b[A",
+            b"\x1b[A", b"\x1b[A", b"\x1b[A", b"\x1b[A", b"\x1b[A", b"\x1b[A",
             b"\x1b[A",
             // The hostname starts blank by the owner's decision 2026-09-24,
             // so the walk supplies one before the username.
@@ -565,7 +567,6 @@ esac
             b"\r", // open the pick
             b"\r", // take whole disk
             b"\x1b[B",
-            b"\x1b[B",
             b"\x1b[B", // to the table
             b"\r", // table mode
             b"\x1b[B", // to the internal disk
@@ -573,12 +574,9 @@ esac
             b"", // settle
             b"\r", // Use this disk
             b"", // settle
-            // A composefs target hides the separate-home answer, so the home
-            // row keeps the system and the home together and asks no size.
             // The walk leaves the table and walks up to the encryption row.
             b"\x1b[A", // the disk above the chosen one
-            b"\x1b[A", // out of the table, to the home row
-            b"\x1b[A", // to the encryption row
+            b"\x1b[A", // out of the table, to the encryption row
             // The encryption type is a radio group. Taking `none` owes no
             // passphrase, so the window closes on the answer.
             b"\r", // the type window opens
@@ -736,12 +734,6 @@ esac
             "{phrase} is not drawn: {transcript}"
         );
     }
-    // A composefs target cannot mount a separate `/var`, so the home row
-    // offers one answer and the size question is never drawn.
-    assert!(
-        !transcript.contains(installer::copy::DATA_SEPARATE),
-        "the hidden separate-home answer is drawn: {transcript}"
-    );
     // The systems the walk found draw as children of the partitions that
     // carry them. The ESP's `EFI/fedora` directory and the old root's own
     // `os-release` are the two sources the fixture writes.

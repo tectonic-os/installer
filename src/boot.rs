@@ -192,8 +192,8 @@ fn run_enrolment(image: &str, esp: &Path) -> Result<(), String> {
     }
 }
 
-/// Writes the menu the installed machine boots from, after fisherman has
-/// finished and unmounted. `bootc` installs the bootloader before it writes
+/// Writes the menu the installed machine boots from, after bootc has
+/// finished. `bootc` installs the bootloader before it writes
 /// the entries, so no step during the install can render them. An image that
 /// ships no renderer is skipped. A renderer that fails for any other reason
 /// fails the install.
@@ -287,105 +287,4 @@ fn run_renderer(image: &str, root: &str) -> Result<bool, String> {
             String::from_utf8_lossy(&out.stderr).trim()
         )),
     }
-}
-
-/// Names the container the layout opened in every BLS entry, so the initrd
-/// can reach the root inside it. The entry bootc wrote names the root
-/// filesystem by UUID and names no container. `rd.luks.name=<uuid>=root`
-/// makes systemd-cryptsetup map the container to `/dev/mapper/root` before
-/// the root is looked for.
-pub(crate) fn inject_luks_args(disk: &str, uuid: &str, name: &str) -> Result<usize, String> {
-    let at = PathBuf::from(TARGET);
-    let boot = at.join("boot");
-    std::fs::create_dir_all(&boot).map_err(|err| format!("{TARGET}: {err}"))?;
-    let Some((device, root)) = boot_partition(disk, &boot)? else {
-        return Err(format!(
-            "no partition of {disk} carries `loader/entries`, so the containers \
-             the layout opened have no boot entry to name"
-        ));
-    };
-    let entries_dir = match root {
-        "/target" => boot.clone(),
-        _ => boot.join("boot"),
-    };
-    let arg = format!("rd.luks.name={uuid}={name}");
-    let mut entries = 0;
-    let mut named = 0;
-    let mut patched = 0;
-    let listed = std::fs::read_dir(entries_dir.join("loader/entries"));
-    if let Ok(listed) = listed {
-        for entry in listed.flatten() {
-            let path = entry.path();
-            if path.extension().is_none_or(|kind| kind != "conf") {
-                continue;
-            }
-            entries += 1;
-            let raw = std::fs::read_to_string(&path)
-                .map_err(|err| format!("{}: {err}", path.display()))?;
-            // An entry that already carries the argument is a retried
-            // install that reached this point. A second `rd.luks.name` on the
-            // options line is noise.
-            let carried = boot_arg_named(&raw, &arg);
-            let (text, changed) = add_boot_arg(&raw, &arg);
-            if changed {
-                std::fs::write(&path, text).map_err(|err| format!("{}: {err}", path.display()))?;
-                patched += 1;
-            }
-            if changed || carried {
-                named += 1;
-            }
-        }
-    }
-    let unmounted = Command::new("umount").arg(&boot).output();
-    match unmounted {
-        Ok(out) if out.status.success() => {}
-        Ok(out) => {
-            return Err(format!(
-                "unmounting {device}: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            ))
-        }
-        Err(err) => return Err(format!("unmounting {device}: {err}")),
-    }
-    if named == 0 {
-        return Err(format!(
-            "{device} carries no boot entry naming the {name} container, so \
-             the machine would not find its root"
-        ));
-    }
-    eprintln!(
-        "{PROGRAM}: named the {name} container in {patched} of {entries} boot entries on {device}"
-    );
-    Ok(patched)
-}
-
-/// Reports whether a BLS entry's options line already carries the argument.
-/// `add_boot_arg` returns the same `false` for an entry that already carries
-/// it and for an entry with no options line, so `inject_luks_args` asks this
-/// as well.
-pub(crate) fn boot_arg_named(raw: &str, arg: &str) -> bool {
-    raw.lines()
-        .any(|line| line.starts_with("options ") && line.split_whitespace().any(|word| word == arg))
-}
-
-/// Returns one BLS entry with the argument on its options line. An entry that
-/// already carries the argument comes back unchanged. `options` is the line
-/// systemd-boot hands the kernel, so the argument belongs on that line alone.
-pub(crate) fn add_boot_arg(raw: &str, arg: &str) -> (String, bool) {
-    let mut changed = false;
-    let mut lines: Vec<String> = raw
-        .lines()
-        .map(|line| {
-            if line.starts_with("options ") && !line.split_whitespace().any(|word| word == arg) {
-                changed = true;
-                format!("{line} {arg}")
-            } else {
-                line.to_string()
-            }
-        })
-        .collect();
-    if raw.ends_with('\n') {
-        lines.push(String::new());
-    }
-    (lines.join("\n"), changed)
 }

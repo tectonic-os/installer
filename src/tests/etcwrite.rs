@@ -35,42 +35,75 @@ fn the_crypttab_keeps_other_entries_and_replaces_its_own() {
 #[test]
 fn the_deployment_etc_is_the_single_one_installed() {
     let root = scratch("deployments");
-    let ostree = root.join("ostree/deploy/default/deploy/deadbeef.0/etc");
-    std::fs::create_dir_all(&ostree).expect("an ostree deployment");
-    assert_eq!(deployment_etc(&root).expect("one"), ostree);
-    let composefs = root.join("state/deploy/deadbeef/etc");
-    std::fs::create_dir_all(&composefs).expect("a composefs deployment");
-    assert!(deployment_etc(&root).is_err());
+    let ostree = root.join("ostree/deploy/default/deploy/deadbeef.0");
+    std::fs::create_dir_all(ostree.join("etc")).expect("an ostree deployment");
+    assert_eq!(deployment(&root).expect("one"), (ostree.clone(), false));
+    let composefs = root.join("state/deploy/deadbeef");
+    std::fs::create_dir_all(composefs.join("etc")).expect("a composefs deployment");
+    assert!(deployment(&root).is_err());
     std::fs::remove_dir_all(&ostree).expect("one deployment");
-    assert_eq!(deployment_etc(&root).expect("one"), composefs);
+    assert_eq!(deployment(&root).expect("one"), (composefs, true));
 }
 
 #[test]
-fn the_root_device_is_where_the_layout_put_it() {
+fn swap_is_named_by_the_filesystem_device() {
+    let plain = CustomLayout {
+        mounts: vec![CustomMount {
+            partition: "/dev/vda2".to_string(),
+            target: "/swap".to_string(),
+            fstype: "unformatted".to_string(),
+            passphrase: String::new(),
+        }],
+        ..Default::default()
+    };
+    assert_eq!(swap_device(&plain).as_deref(), Some("/dev/vda2"));
     let opened = CustomLayout {
-        disk: "/dev/vda".to_string(),
-        mounts: Vec::new(),
         opens: vec![LuksOpen {
             partition: "/dev/vda3".to_string(),
-            target: "/".to_string(),
+            target: "/swap".to_string(),
             key: Key::Passphrase("opensesame".to_string()),
         }],
         ..Default::default()
     };
-    assert_eq!(root_device(&opened).as_deref(), Some("/dev/mapper/tect-1"));
-    let mounted = CustomLayout {
-        disk: "/dev/vda".to_string(),
-        mounts: vec![CustomMount {
-            partition: "/dev/vda2".to_string(),
-            target: "/".to_string(),
-            fstype: "ext4".to_string(),
+    assert_eq!(swap_device(&opened).as_deref(), Some("/dev/mapper/tect-1"));
+}
 
-            passphrase: String::new(),
-        }],
-        opens: Vec::new(),
-        ..Default::default()
-    };
-    assert_eq!(root_device(&mounted).as_deref(), Some("/dev/vda2"));
+#[test]
+fn the_swap_fstab_line_replaces_only_its_own_uuid() {
+    let root = scratch("swap-fstab");
+    let etc = root.join("etc");
+    std::fs::create_dir_all(&etc).expect("an etc");
+    std::fs::write(
+        etc.join("fstab"),
+        "UUID=root / ext4 defaults 0 1\nUUID=swap none swap defaults 0 0\n",
+    )
+    .expect("an fstab");
+    merge_fstab(&etc, "swap").expect("a swap line");
+    let said = std::fs::read_to_string(etc.join("fstab")).expect("an fstab");
+    assert_eq!(said.matches("UUID=swap").count(), 1, "{said}");
+    assert!(said.contains("UUID=root / ext4"), "{said}");
+}
+
+#[test]
+fn selinux_uses_the_target_policy_file() {
+    let deployment = scratch("target-policy");
+    let selinux = deployment.join("etc/selinux/strict/contexts/files");
+    std::fs::create_dir_all(&selinux).expect("a policy directory");
+    std::fs::write(
+        deployment.join("etc/selinux/config"),
+        "SELINUX=enforcing\nSELINUXTYPE='strict'\n",
+    )
+    .expect("a config");
+    let contexts = selinux.join("file_contexts");
+    std::fs::write(&contexts, "").expect("file contexts");
+    assert_eq!(
+        target_contexts(&deployment).expect("a policy"),
+        Some(contexts)
+    );
+    assert_eq!(
+        target_contexts(&scratch("no-target-policy")).expect("no policy"),
+        None
+    );
 }
 
 /// The authenticating key keeps its form: a passphrase travels on stdin and

@@ -124,7 +124,7 @@ pub(crate) fn ask_disk(
     }
 }
 
-/// Returns the encryption kind where fisherman has one by that name. The
+/// Returns the encryption kind where `KINDS` holds one by that name. The
 /// form validates a flag this way without asking the user anything.
 pub(crate) fn named(kind: String) -> Result<String, String> {
     if KINDS.iter().any(|(name, _, _)| *name == kind) {
@@ -140,8 +140,8 @@ pub(crate) fn named(kind: String) -> Result<String, String> {
     ))
 }
 
-/// Reads a description back as the name fisherman is given, which reverses
-/// `shown`. A flag is scripted, so it takes fisherman's names, and the screen
+/// Reads a description back as the name `KINDS` pairs with it, which
+/// reverses `shown`. A flag is scripted, so it takes the names. The screen
 /// shows the descriptions instead. A label no row holds reads as `none`.
 pub(crate) fn written(shown: &str) -> &'static str {
     KINDS
@@ -372,43 +372,6 @@ pub(crate) fn slots_from(raw: &str) -> Result<Slots, String> {
     }
     tokens.sort();
     Ok(Slots { keys, tokens })
-}
-
-/// Builds what the `home and data` row offers. One answer keeps the system
-/// and the home on one partition. The other cuts a home partition of its own
-/// out of the install disk, and that partition is `/var` itself. A composefs
-/// target binds `/var` from the root before any fstab unit runs, so the
-/// separate answer is hidden there rather than offered and never mounted.
-pub(crate) fn data_rows(composefs: bool) -> Vec<Choice> {
-    let separate = Choice::new(copy::DATA_SEPARATE, "");
-    vec![
-        Choice::new(copy::DATA_TOGETHER, ""),
-        match composefs {
-            true => separate.hidden(),
-            false => separate,
-        },
-    ]
-}
-
-/// Reads the `home and data` answer back off its own label. Only the
-/// separate answer carries a size.
-pub(crate) fn chose(shown: &str, size: &str) -> Data {
-    match shown == copy::DATA_SEPARATE {
-        true => Data {
-            size: size.to_string(),
-        },
-        false => Data::default(),
-    }
-}
-
-/// Says what the summary makes of the `home and data` answer. The home row
-/// under it carries the size, which is the one place the partition is spelled
-/// out.
-pub(crate) fn data_said(data: &Data) -> String {
-    match data.size.is_empty() {
-        true => copy::DATA_TOGETHER.to_string(),
-        false => copy::DATA_SEPARATE.to_string(),
-    }
 }
 
 /// Asks for the encryption where no form draws. A `tpm2-` kind on a machine

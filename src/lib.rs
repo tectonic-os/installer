@@ -1,8 +1,7 @@
 //! Installs a bootc image onto a disk, from a payload the boot media carries.
 //!
 //! The crate finds a payload root, reads the recipe in that root, adds the
-//! user's half of the answers, and hands the completed recipe to fisherman.
-//! Fisherman owns partitioning, LUKS, TPM2 enrolment and `bootc install`.
+//! user's answers, and runs the image's own `bootc install`.
 //!
 //! A payload root is any directory holding `install-recipe.json`. `--from`
 //! names one outright, and `payload::root` finds one by the partition label
@@ -19,9 +18,9 @@ pub(crate) use common::ui::Choice;
 pub(crate) use std::path::{Path, PathBuf};
 pub(crate) use std::process::{Command, Stdio};
 
+mod account;
 mod answers;
 mod automatic;
-mod backend;
 mod boot;
 mod collect;
 mod discover;
@@ -32,6 +31,7 @@ mod esp;
 mod etcwrite;
 mod fdisk;
 mod form;
+mod layout;
 mod lock;
 mod panel;
 mod payload;
@@ -40,9 +40,9 @@ mod run;
 mod table;
 mod volumes;
 
+pub(crate) use account::*;
 pub use answers::*;
 pub(crate) use automatic::*;
-pub(crate) use backend::*;
 pub(crate) use boot::*;
 pub(crate) use discover::*;
 pub use disks::*;
@@ -51,10 +51,11 @@ pub(crate) use env::*;
 pub(crate) use esp::*;
 pub(crate) use etcwrite::*;
 pub(crate) use form::*;
+pub(crate) use layout::*;
 pub use lock::*;
 pub(crate) use panel::*;
 pub use payload::*;
-pub use recipe::*;
+pub(crate) use recipe::*;
 pub use run::*;
 pub(crate) use table::*;
 pub(crate) use volumes::*;

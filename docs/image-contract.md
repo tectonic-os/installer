@@ -12,67 +12,80 @@ running the image under podman, and both lists are below in full.
 ## The recipe floor
 
 The payload root is any directory holding `install-recipe.json`. That document
-is fisherman's own recipe format with two fields added, listed under [The two
-fields outside fisherman's schema](#the-two-fields-outside-fishermans-schema).
+is the installer's own format. `InstallRecipe::read` in `src/recipe.rs` holds
+every field it accepts, and it reads the document when the root is classified,
+before anything is asked.
 
-### Three fields are the floor
+### Five fields are the floor
 
-A hand-written recipe installs with three fields:
+A hand-written recipe installs with five fields:
 
     {
       "image": "quay.io/fedora/fedora-bootc:42",
       "hostname": "workstation",
-      "filesystem": "ext4"
+      "filesystem": "ext4",
+      "bootloader": "grub2",
+      "additionalImageStores": ["/var/lib/tectonic/store"]
     }
 
-`classify` in `src/payload.rs` requires `image` and `hostname`, and refuses the
-root naming the missing one. It does not require `filesystem`, and fisherman
-does: `Validate` accepts only `xfs`, `ext4`, `btrfs` or `zfs` on the
-auto-partitioning branch. `complete` in `src/recipe.rs` never writes that field,
-so a recipe without it reaches fisherman without it. **Nothing catches that
-before the disk is cut.** `run` in `src/run.rs` partitions first and starts
-fisherman after, so a recipe missing `filesystem` fails `Validate` on a machine
-whose old partition table is already gone. Write it by hand.
+`InstallRecipe::read` refuses the root naming whichever of the five is missing
+or empty. `bootloader` is `grub2` or `systemd`, and it decides whether the
+whole-disk layout cuts a separate `/boot`, whether bootc takes
+`--bootloader systemd`, and with `composeFsBackend` whether the root is found by
+its partition type, so no default stands in for it. `additionalImageStores` is
+required because the install runs with `--pull=never`, so it reads the image
+from the media store and contacts no registry. `validate_recipe` in `src/run.rs` asks podman for the image before
+the cut, so a store that lacks it is refused with the disk untouched.
 
-`filesystem` also constrains two other fields. `composeFsBackend` needs
-fs-verity, so fisherman refuses it on `xfs`. `zfs` refuses LUKS encryption.
+`filesystem` is the whole-disk root's filesystem, and the editor draws its
+automatic plan with it. A manual root takes the filesystem the user chooses.
+`tect` writes `xfs`, `ext4` or `btrfs` here. `prepare` in `src/layout.rs` checks
+every filesystem the plan formats before the cut, so a filesystem it has no
+`mkfs` for is refused with the disk untouched. `composeFsBackend` needs fs-verity on the
+root, which `xfs` has not got, so `InstallRecipe::read` refuses that pair. The
+installer formats the whole-disk root and an opened old root with the recipe's
+`filesystem`, and the manual editor applies the same rule to any other root.
+
+### A field the installer does not implement is refused
+
+`InstallRecipe::read` refuses a field outside its list, naming it, and it
+refuses a field that occurs twice. `user` takes `groups` and nothing else. The
+refusal comes before the cut because a recipe carrying `varDisk`, `zfsPoolName`
+or `btrfsSubvolumes` names a layout this installer does not write, and
+installing without it would give the user a machine the image did not describe.
 
 ### What the user's answers add
 
-`complete` merges the form into the recipe before fisherman sees it. The user
-supplies `disk`, `hostname`, `user.username`, `user.password` and
-`encryption.type`, with `encryption.passphrase` and `encryption.pin` where the
-chosen kind needs them. The password is hashed with `openssl passwd -6` first.
+The form supplies the disk, the hostname, the username, the password and the
+encryption kind, with a passphrase or a PIN where the kind needs one. None of
+them is written back into the recipe. The installer hashes the password with
+`openssl passwd -6` before it changes the disk, and `useradd --password` writes
+the hash into the installed deployment.
 
-`user` is merged and not replaced, so `user.groups` in the recipe survives. That
-group is the target's admin group, which differs by family, and `useradd`
-refuses the whole call when it names a group the target has not got.
-
-A manual layout writes `customMounts` and removes `varDisk`. The removal is
-unconditional, because fisherman refuses `customMounts` beside a `varDisk` that
-sets a size or asks to be encrypted.
+`user.groups` names the target's admin group, which differs by family. A listed
+group the installed deployment has not got and warns, because `useradd`
+refuses the whole call when it receives one.
 
 ### What the recipe is read for and does not have to hold
 
 | Field | Read by | Absent |
 | --- | --- | --- |
-| `bootloader` | the panel, the summary the user agrees to, and fisherman | read as `grub2`, and a separate `/boot` is cut |
-| `composeFsBackend` | the manual root filesystem rule | treated as false, and a manual root may be any filesystem |
+| `targetImgref` | `bootc_command`, as `--target-imgref` | the installed machine updates from `image` |
+| `composeFsBackend` | the root filesystem rules and `bootc_command` | treated as false, and a root may be any filesystem |
+| `genericImage` | `bootc_command`, as `--generic-image` | treated as false |
 | `boot` | `require_signed_boot_chain`, `configure_boot_chain` | no chain is declared, and the existing boot path installs |
 | `luksInitramfs` | `kinds` in `src/disks.rs` | no encrypted kind is drawn on the form |
+| `user.groups` | `account::configure` | the account is made in no extra group |
 
-The install refuses none of these. It reads a default, or the option is never
-drawn. Two of those defaults are worth stating outright. An image that
-boots with systemd-boot and omits `bootloader` is installed as though it used
-GRUB, so it is given a separate `/boot` partition it does not want. An image
-that is sealed with composefs and omits `composeFsBackend` loses the rule that
-holds a manual root to ext4 or btrfs, and nothing on any screen names either
-field.
+Each of these is optional. The installer reads a default, and the form does not
+draw the option. An image that is sealed with composefs and omits
+`composeFsBackend` is installed unsealed, and it loses the rule that holds its
+root to ext4 or btrfs. No screen names the field.
 
-### The two fields outside fisherman's schema
+### The two fields that describe the image
 
-`boot` and `luksInitramfs` are claims about the image that fisherman never
-reads.
+`boot` and `luksInitramfs` are claims about the image that the installer never
+passes to bootc.
 
 `boot` names the UKI trust chain the image was built for, `uki-db` or
 `uki-shim`. A recipe declaring one is refused before the disk is cut unless the
@@ -93,14 +106,14 @@ of them still installs unencrypted on the existing boot path.
 | --- | --- | --- | --- |
 | `/usr/share/secureboot/signed` | `require_signed_boot_chain` | before the cut, where `boot` is declared | the install is refused, and the disk is untouched |
 | `/usr/share/secureboot/sb_cert.pem` | `owner_certificate` in `src/panel.rs` | while the firmware is read, where `boot` is declared and a foreign key holds the platform key | the firmware reads as holding a foreign key. On the `uki-db` chain the last screen then asks for the vendor's setup-mode steps |
-| `/usr/share/secureboot/pcr-policy.pem` | `pcr_policy_in` | while `/etc` is written, where a manual layout opened a container with TPM2 | the first-boot token binds to PCR 7 alone |
-| `/usr/libexec/secureboot-enrolment` | `run_enrolment` | after fisherman, on the `uki-shim` chain | the install fails with the disk already written |
-| `/usr/libexec/grub-menu-from-bls` | `run_renderer` | after fisherman | the step is skipped, and the install succeeds |
+| `/usr/share/secureboot/pcr-policy.pem` | `pcr_policy_in` | while `/etc` is written, where the install creates or opens a container with TPM2 | the first-boot token binds to PCR 7 alone |
+| `/usr/libexec/secureboot-enrolment` | `run_enrolment` | after bootc, on the `uki-shim` chain | the install fails with the disk already written |
+| `/usr/libexec/grub-menu-from-bls` | `run_renderer` | after bootc | the step is skipped, and the install succeeds |
 
 Of those five, only the signed marker is a refusal, and only it is read before
 anything is written. An image declaring `uki-shim` must carry the enrolment
 helper as well as the marker, because nothing checks for the helper until
-fisherman has finished. That chain also ignores the owner certificate when it
+bootc has finished. That chain also ignores the owner certificate when it
 asks for the next steps: it always asks for the shim steps, whatever the
 firmware holds.
 
@@ -110,9 +123,10 @@ that does not ship it exits 3 from the probe, which is the skip.
 Two more probes read paths no vendor owns. `require_tpm2_enrolment` runs
 `/usr/bin/systemd-cryptenroll` in the image, because the image enrols that token
 itself on its first boot. **It is the second refusal that runs before the cut**,
-and it runs where a manual layout opened a container with TPM2. `image_gb` in
-`src/payload.rs` runs `podman image inspect`, not a container, to size the root
-a separate home must leave room for.
+and it runs for every `tpm2-` kind and wherever a manual layout opened a
+container with TPM2. `image_gb` in
+`src/payload.rs` sizes the smallest root the install accepts with `podman image
+inspect`, which runs no container.
 
 ### Paths of the media, not of the image
 
@@ -123,11 +137,14 @@ partition labelled `TECT` overrides that default.
 
 ## Where this is checked
 
-`three_hand_written_fields_are_the_floor_for_a_generic_bootc_image` in
-`src/tests/payload.rs` writes the three-field recipe above, classifies it,
-asserts every optional field is absent, asserts that no encrypted kind is
-offered, and runs `complete` over it to prove `disk`, `hostname`, `image` and
-`filesystem` are all present afterwards. Fisherman's `Validate` requires the
-first, the second and the last of those; `classify` requires `image`, and
-fisherman does not, because bootc can read the reference off the running
-container. A change that adds a fourth hand-written field breaks the test.
+`a_hand_written_recipe_names_the_media_store` in `src/tests/payload.rs` writes
+the five-field recipe above, classifies it, asserts the defaults the table
+names, asserts that no encrypted kind is offered, and then asserts that
+`classify` refuses the same recipe without its store. `a_recipe_without_a_bootloader_is_refused_by_name` in
+`src/tests/recipe.rs` holds the `bootloader` refusal, and
+`a_sealed_recipe_on_a_filesystem_without_verity_is_refused` beside it holds the
+fs-verity rule. `a_recipe_field_the_installer_does_not_implement_is_refused_by_name`
+in `src/tests/recipe.rs` adds `varDisk` to an emitted recipe and asserts the
+refusal names it. `a_plan_the_payload_cannot_answer_refuses_before_the_cut` in
+`src/tests/layout.rs` holds the whole-disk refusals. A change that adds a sixth
+required field breaks the first test.

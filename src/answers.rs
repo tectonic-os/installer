@@ -14,13 +14,12 @@ pub(crate) struct CustomMount {
     pub(crate) partition: String,
     pub(crate) target: String,
     pub(crate) fstype: String,
-    /// Holds the passphrase a `luks` format kept. No reader takes it yet.
-    /// The per-partition encryption field fisherman needs arrives in 8G
-    /// phase 2.
+    /// Holds the passphrase a `luks` format kept. No reader takes it, because
+    /// `layout_short_of` refuses a manual `luks` format before the install.
     pub(crate) passphrase: String,
 }
 
-/// Holds one partition the plan renames before fisherman runs. The partition
+/// Holds one partition the plan renames when it cuts the disk. The partition
 /// already exists, so the cut writes the name through `sfdisk --part-label`.
 /// A planned partition carries its name in the cut script instead.
 #[derive(Clone, Debug, PartialEq)]
@@ -86,7 +85,7 @@ pub(crate) struct Mounted {
 /// formatted. It is read out of an answer and never written into a recipe.
 pub(crate) const OPEN: &str = "open";
 
-/// Holds a partition the plan will cut before fisherman runs. `sfdisk
+/// Holds a partition the plan will cut before the install formats it. `sfdisk
 /// --append` decides the number, so the screens derive the device from the
 /// surviving partitions every time. The answers ride on this plan entry
 /// rather than on a name that moves.
@@ -110,6 +109,12 @@ pub(crate) struct Created {
     /// it then. It stays empty until then, because only the cut knows the
     /// node for a fact.
     pub(crate) device: String,
+    /// Only the whole-disk plan sets it, because the editor refuses a manual
+    /// container.
+    pub(crate) encrypt: bool,
+    /// Marks a partition the cut types `ROOT_GUID`, so an initrd with no
+    /// `root=` argument finds it.
+    pub(crate) discoverable: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -125,10 +130,10 @@ pub(crate) struct CustomLayout {
     pub(crate) deletes: Vec<String>,
     pub(crate) creates: Vec<Created>,
     /// Holds the labels the plan writes onto partitions it keeps. `run`
-    /// enacts each through `sfdisk --part-label` before fisherman runs.
+    /// enacts each through `sfdisk --part-label` after the creates.
     pub(crate) renames: Vec<Rename>,
     /// Holds the ESP entries the plan replaces. `run` removes them before
-    /// fisherman writes the entries the image carries.
+    /// `bootc` writes the entries the image carries.
     pub(crate) esp: Vec<EspRemoval>,
     /// Holds the disk the user reviewed immediately before the destructive
     /// summary. `cut_partitions` refuses a replaced or changed table rather
@@ -181,14 +186,19 @@ impl CustomLayout {
     }
 
     /// Names each opened container for `/dev/mapper`, in the order the
-    /// layout opens them. `cryptsetup` takes the bare name, and fisherman
-    /// takes the path built from it.
+    /// layout opens them. `cryptsetup` takes the bare name. The installer
+    /// mounts the path `mapper_path` builds from it.
     pub(crate) fn mappers(&self) -> Vec<(String, &LuksOpen)> {
         self.opens
             .iter()
             .enumerate()
             .map(|(at, open)| (format!("tect-{}", at + 1), open))
             .collect()
+    }
+
+    /// Whether the cut writes the partition table at all.
+    pub(crate) fn changes_table(&self) -> bool {
+        !(self.deletes.is_empty() && self.creates.is_empty() && self.renames.is_empty())
     }
 
     /// Whether a container this layout opens is the root, which is the
@@ -307,16 +317,6 @@ pub(crate) fn at_boot(open: &LuksOpen, opened: Opened) -> &'static str {
     }
 }
 
-/// Holds where the home area goes. `/home` is `/var/home` on a bootc system,
-/// so a separate home is a separate `/var` cut out of the install disk. The
-/// other answer keeps the system and the home on the root partition.
-#[derive(Default)]
-pub struct Data {
-    /// Holds the size to cut out of the install disk. A home sharing the
-    /// root leaves it empty.
-    pub size: String,
-}
-
 impl Encryption {
     pub(crate) fn wants_passphrase(kind: &str) -> bool {
         kind.ends_with("passphrase")
@@ -335,7 +335,6 @@ pub struct Answers {
     pub user: String,
     pub password: String,
     pub encryption: Encryption,
-    pub data: Data,
     pub(crate) layout: Option<CustomLayout>,
     /// Holds what the row replacing the encryption kinds answered, once the
     /// layout opens a container. Every other install keeps `Keep`, because

@@ -1,7 +1,7 @@
 use super::*;
 
-/// Two of the five kinds fisherman takes end in `passphrase`. The other
-/// three are answered without one.
+/// Two of the five kinds in `KINDS` end in `passphrase`. The other three are
+/// answered without one.
 #[test]
 fn only_the_forms_named_for_a_passphrase_are_asked_for_one() {
     let wants: Vec<&str> = KINDS
@@ -93,8 +93,6 @@ fn the_whole_disk_form_refuses_a_seeded_tpm2_kind_without_a_tpm() {
             vec![Choice::new(shown("tpm2-luks"), "")],
             Some(0),
         ),
-        Field::pick(copy::ROW_DATA, vec![Choice::new(copy::NONE, "")], Some(0)),
-        Field::text(copy::ROW_SIZE, ""),
         Field::table(
             "disk",
             "disk",
@@ -143,8 +141,6 @@ fn the_whole_disk_form_refuses_a_seeded_pin_kind_with_no_pin() {
             vec![Choice::new(shown("tpm2-luks-pin"), "")],
             Some(0),
         ),
-        Field::pick(copy::ROW_DATA, vec![Choice::new(copy::NONE, "")], Some(0)),
-        Field::text(copy::ROW_SIZE, ""),
         Field::table(
             "disk",
             "disk",
@@ -181,12 +177,12 @@ fn the_confirm_screen_shows_what_is_about_to_be_erased() {
             passphrase: String::new(),
             pin: String::new(),
         },
-        data: Data::default(),
         layout: None,
     };
     assert_eq!(
         answers.summary(&Payload {
             recipe: "/mnt/tect/install-recipe.json".into(),
+            install: an_install_recipe(),
             image: "ghcr.io/tectonic-os/deb2:latest".to_string(),
             hostname: "deb2".to_string(),
             filesystem: "ext4".to_string(),
@@ -206,7 +202,6 @@ fn the_confirm_screen_shows_what_is_about_to_be_erased() {
                 copy::PASSWORD_SET.to_string()
             ),
             (copy::ROW_ENCRYPTION.to_string(), copy::ENC_NONE.to_string()),
-            (copy::ROW_DATA.to_string(), copy::DATA_TOGETHER.to_string()),
             // These three rows are the default layout the user never
             // answered. The summary is the only screen that spells it out.
             ("esp".to_string(), "2.0 GB  fat32".to_string()),
@@ -220,87 +215,6 @@ fn the_confirm_screen_shows_what_is_about_to_be_erased() {
         "{question}"
     );
     assert!(!question.contains("hunter2"));
-}
-
-/// The ESP and `/boot` take their room before home does, so the room home
-/// is measured against is smaller than the disk row says.
-#[test]
-fn a_home_size_the_disk_cannot_hold_is_refused() {
-    use common::ui::{Cell, Choice, Field};
-    let disk = |answered: bool| {
-        let name = match answered {
-            true => Cell::set("\u{25c9} QEMU HARDDISK (/dev/vda)"),
-            false => Cell::new("\u{25c9} QEMU HARDDISK (/dev/vda)"),
-        };
-        let row = vec![
-            name,
-            Cell::new("68.7 GB"),
-            Cell::new(""),
-            Cell::new(""),
-            Cell::new(""),
-            Cell::new(""),
-        ];
-        Field::table(
-            copy::DISK_SELECTION,
-            copy::ROW_DISK,
-            &copy::layout_headings(),
-            &[],
-            vec![row],
-            vec![true],
-            vec![Vec::new()],
-            0,
-            false,
-            answered,
-        )
-    };
-    let form = |size: &str| {
-        vec![
-            Field::text(copy::ROW_HOSTNAME, "deb2"),
-            Field::text(copy::ROW_ACCOUNT, "tect"),
-            Field::secret(copy::ROW_PASSWORD, "hunter2"),
-            Field::secret(copy::ROW_CONFIRM, "hunter2"),
-            Field::pick(
-                copy::ROW_LAYOUT,
-                vec![
-                    Choice::new(copy::LAYOUT_WHOLE, ""),
-                    Choice::new(copy::LAYOUT_MANUAL, ""),
-                ],
-                Some(0),
-            ),
-            Field::action(copy::ROW_ENCRYPTION, shown(NONE)),
-            Field::pick(
-                copy::ROW_DATA,
-                vec![Choice::new(copy::DATA_SEPARATE, "")],
-                Some(0),
-            ),
-            Field::measure(copy::ROW_SIZE, size, "GB"),
-            disk(true),
-            Field::secret(copy::ROW_PASSPHRASE, ""),
-        ]
-    };
-    // The ESP takes 2 GB, the GRUB `/boot` 2 GB and the root's reserve
-    // 10 GB. A 40 GB home fits, because 40 plus 14 is under the disk's 68.
-    assert!(short_of(&form("40"), "/dev/vda", None, &a_payload(), true, None).is_none());
-    // A home under 1 GB is refused before the disk room is measured.
-    assert_eq!(
-        short_of(&form("0"), "/dev/vda", None, &a_payload(), true, None).as_deref(),
-        Some(copy::home_too_small("0.0 GB").as_str())
-    );
-    // A home that leaves the root no room is refused.
-    assert_eq!(
-        short_of(&form("500"), "/dev/vda", None, &a_payload(), true, None).as_deref(),
-        Some(copy::home_too_big("500.0 GB", "68.7 GB").as_str())
-    );
-    assert_eq!(
-        short_of(&form("65"), "/dev/vda", None, &a_payload(), true, None).as_deref(),
-        Some(copy::home_too_big("65.0 GB", "68.7 GB").as_str())
-    );
-    // With no disk row answered `chosen_disk` returns `None`, so the size
-    // check is skipped and the missing list names the disk instead.
-    let mut unchosen = form("500");
-    unchosen[ROW_TABLE] = disk(false);
-    let said = short_of(&unchosen, "", None, &a_payload(), true, None).unwrap_or_default();
-    assert!(said.contains(copy::INSTALLATION_DISK), "{said}");
 }
 
 /// Holds `asked` to the rows it draws as the layout answer changes. The
@@ -323,8 +237,6 @@ fn the_passphrase_is_never_a_row_and_the_manual_rows_come_and_go() {
                 Some(usize::from(manual)),
             ),
             encryption,
-            Field::pick(copy::ROW_DATA, vec![Choice::new(copy::NONE, "")], Some(0)),
-            Field::text(copy::ROW_SIZE, ""),
             Field::table(
                 "disk",
                 "disk",
@@ -345,21 +257,11 @@ fn the_passphrase_is_never_a_row_and_the_manual_rows_come_and_go() {
     for kind in [NONE, "tpm2-luks", "luks-passphrase", "tpm2-luks-passphrase"] {
         assert!(!asked(&form(false, kinds(kind))).contains(&ROW_PASSPHRASE));
     }
-    // The size row is asked only once the user answers a separate home.
-    let mut sized = form(false, kinds(NONE));
-    assert!(!asked(&sized).contains(&ROW_SIZE));
-    sized[ROW_DATA] = Field::pick(
-        copy::ROW_DATA,
-        vec![Choice::new(copy::DATA_SEPARATE, "")],
-        Some(0),
-    );
-    assert!(asked(&sized).contains(&ROW_SIZE));
-    // A whole-disk answer asks eight rows, dropping passphrase and size.
-    assert_eq!(asked(&form(false, kinds(NONE))).len(), 8);
+    // A whole-disk answer asks seven rows, dropping the passphrase.
+    assert_eq!(asked(&form(false, kinds(NONE))).len(), 7);
     // A manual layout with no container open drops the whole-disk rows.
     let bare = asked(&form(true, kinds(NONE)));
     assert!(!bare.contains(&ROW_ENCRYPTION));
-    assert!(!bare.contains(&ROW_DATA) && !bare.contains(&ROW_SIZE));
     assert!(bare.contains(&ROW_TABLE));
     let opened = Field::pick(
         copy::ROW_ENCRYPTION,
@@ -393,8 +295,6 @@ fn the_action_says_what_the_form_is_short_of() {
                 vec![Choice::new(shown(kind), "")],
                 Some(0),
             ),
-            Field::pick(copy::ROW_DATA, vec![Choice::new(copy::NONE, "")], Some(0)),
-            Field::text(copy::ROW_SIZE, ""),
             Field::table(
                 "disk",
                 "disk",
@@ -487,25 +387,6 @@ fn the_action_says_what_the_form_is_short_of() {
         "{short}"
     );
 
-    // A separate home answer is short of the size row until it is filled.
-    let data = |form: &mut Vec<common::ui::Field>, label: String, size: &str| {
-        form[ROW_DATA] = Field::pick(copy::ROW_DATA, vec![Choice::new(label, "")], Some(0));
-        form[ROW_SIZE] = Field::text(copy::ROW_SIZE, size);
-    };
-    let mut sized = form("hunter2", "hunter2", NONE, "");
-    data(&mut sized, copy::DATA_SEPARATE.to_string(), "");
-    assert!(short_of(&sized, "/dev/vda", None, &a_payload(), true, None)
-        .unwrap()
-        .contains(copy::ROW_SIZE));
-    data(&mut sized, copy::DATA_SEPARATE.to_string(), "200 GB");
-    assert!(short_of(&sized, "/dev/vda", None, &a_payload(), true, None).is_none());
-
-    // Fisherman wraps the separate home in the root's passphrase, so an
-    // encrypted kind and a separate home are accepted together.
-    let mut encrypted = form("hunter2", "hunter2", "tpm2-luks", "");
-    data(&mut encrypted, copy::DATA_SEPARATE.to_string(), "200 GB");
-    assert!(short_of(&encrypted, "/dev/vda", None, &a_payload(), true, None).is_none());
-
     // A root opened by a key file leaves the machine nothing to read at
     // boot. A TPM2 token staged inside that root cannot be enrolled before
     // the first boot unlocks it, so both answers on the row are refused.
@@ -558,7 +439,7 @@ fn the_action_says_what_the_form_is_short_of() {
 
     // A plain root encrypts nothing, so a key added beside it would sit
     // readable. An answer held from when the root was open is refused
-    // here, before fisherman writes the disk.
+    // here, before the installer writes the disk.
     let plain_root = CustomLayout {
         disk: "/dev/vda".to_string(),
         mounts: vec![

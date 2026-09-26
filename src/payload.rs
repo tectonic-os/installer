@@ -19,7 +19,8 @@ pub fn media() -> PathBuf {
 #[derive(Debug)]
 pub struct Payload {
     pub recipe: PathBuf,
-    /// Names the reference fisherman installs. On media this is the published
+    pub(crate) install: InstallRecipe,
+    /// Names the reference bootc installs. On media this is the published
     /// name the local bytes are embedded under.
     pub image: String,
     /// Names the installed machine. This is the one derived value the
@@ -40,8 +41,8 @@ pub struct Payload {
     /// backend seals the deployment and needs fs-verity on the root, so a
     /// manual root formatted xfs or ext3 cannot carry it.
     pub composefs: bool,
-    /// Holds the room a separate home must leave for the root. The installer
-    /// probes the image the first time a caller asks. The figure is twice the
+    /// The installer probes the image the first time a caller asks. The
+    /// figure is twice the
     /// image bytes, which covers the copy that installs and the deployment
     /// staged beside it, plus 2 GB of slack. An image it cannot measure
     /// reserves 10 GB.
@@ -93,8 +94,7 @@ impl Payload {
         })
     }
 
-    /// Returns the whole GB a separate home must leave for the root. The
-    /// first call probes the image. Every draw of the form after that is
+    /// The first call probes the image. Every draw of the form after that is
     /// free.
     pub fn reserve_gb(&self) -> u64 {
         *self
@@ -174,33 +174,19 @@ impl Found {
 pub fn classify(root: &Path) -> Result<Found, String> {
     let recipe = root.join(RECIPE);
     if recipe.is_file() {
-        let raw = std::fs::read_to_string(&recipe)
-            .map_err(|err| format!("{}: {err}", recipe.display()))?;
-        let doc = Json::parse(&raw).map_err(|err| format!("{}: {err}", recipe.display()))?;
-        let field = |key: &str| {
-            json::text(&doc, key)
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| format!("{}: no `{key}`", recipe.display()))
-        };
-        // The fields below are read and never required. A recipe this tool
-        // wrote always carries them, and a recipe without them still
-        // installs. Each one reads as a default instead, so an absent
-        // `bootloader` installs the machine as though it used GRUB.
-        let told = |key: &str| json::text(&doc, key).unwrap_or_default();
+        let install = InstallRecipe::read(&recipe)?;
         return Ok(Found::Image(Payload {
-            image: field("image")?,
-            hostname: field("hostname")?,
-            filesystem: told("filesystem"),
-            bootloader: told("bootloader"),
-            boot: told("boot"),
-            composefs: matches!(
-                json::field(&doc, "composeFsBackend"),
-                Some(Json::Bool(true))
-            ),
+            image: install.image.clone(),
+            hostname: install.hostname.clone(),
+            filesystem: install.filesystem.clone(),
+            bootloader: install.bootloader.clone(),
+            boot: install.boot.clone(),
+            composefs: install.composefs,
             reserve: std::sync::OnceLock::new(),
-            luks_initramfs: matches!(json::field(&doc, "luksInitramfs"), Some(Json::Bool(true))),
+            luks_initramfs: install.luks_initramfs,
             esp_entries: std::sync::OnceLock::new(),
             recipe,
+            install,
         }));
     }
     Ok(match root.join(crate::REPO_FILE).is_file() {
@@ -249,9 +235,9 @@ pub(crate) fn labelled(listed: &str) -> Vec<String> {
         .collect()
 }
 
-/// Mounts the payload partition read-only and leaves it mounted. Fisherman
-/// reads the store beside the recipe, and this environment ends at the
-/// reboot.
+/// Mounts the payload partition read-only and leaves it mounted. `open_log`
+/// later remounts the partition to write the install log beside the recipe.
+/// The mount lasts until this environment reboots.
 pub(crate) fn mounted(device: &str) -> Result<PathBuf, String> {
     let at = PathBuf::from(MOUNTPOINT);
     // A second run finds the mount the first run left and carries on over it.

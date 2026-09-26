@@ -48,7 +48,7 @@ impl Answers {
             _ => chosen,
         };
         let mut layout: Option<CustomLayout> = None;
-        let mut fields = seeded.fields(payload, &scan, &disk, layout.as_ref(), "");
+        let mut fields = seeded.fields(payload, &scan, &disk, layout.as_ref());
         let panel = panel(payload);
         // The disk table keeps its own cursor across the form reopens, so the
         // walk stays on the row the user left. `None` seeds it on the chosen
@@ -98,22 +98,11 @@ impl Answers {
                 true => Some(scan.table(&disk)?),
                 false => None,
             };
-            // A home size the user typed stops shaping the plan once the home
-            // row goes back to sharing the root. The home row gates the size.
-            let separate = fields[ROW_DATA].value() == copy::DATA_SEPARATE;
-            let size = match separate {
-                true => fields[ROW_SIZE].value(),
-                false => String::new(),
-            };
             let table = layout_table(
                 &scan,
                 &disk,
                 layout.as_ref(),
                 payload,
-                &size,
-                // The plan draws a separate home partition before its size is
-                // typed.
-                separate,
                 // The whole-disk kind answers this, because a layout with open
                 // containers replaces the encryption row.
                 kind != NONE,
@@ -383,13 +372,12 @@ impl Answers {
                                 }
                                 PartAction::Format => {
                                     // A created partition is offered the plain
-                                    // formats. `customMounts` has no
-                                    // passphrase field, so `short_of` refuses
-                                    // a manual container with
-                                    // `CUSTOM_LUKS_LATER`. That rule reads
-                                    // `mounts` and a create is not one, so
-                                    // offering `luks` here would be a dead end
-                                    // with no refusal on screen.
+                                    // formats. `short_of` refuses a manual
+                                    // container with `CUSTOM_LUKS_LATER`.
+                                    // That rule reads `mounts`. A create is
+                                    // not a mount, so offering `luks` here
+                                    // would be a dead end with no refusal on
+                                    // screen.
                                     let options = copy::plain_formats();
                                     let current = layout
                                         .as_ref()
@@ -478,9 +466,13 @@ impl Answers {
                                             copy::UNASSIGN => {
                                                 place_unassign(&mut layout, partition)
                                             }
-                                            _ => {
-                                                place_target(&mut layout, &disk, partition, target)
-                                            }
+                                            _ => place_target(
+                                                &mut layout,
+                                                &disk,
+                                                partition,
+                                                target,
+                                                &payload.filesystem,
+                                            ),
                                         }
                                     }
                                 }
@@ -534,13 +526,6 @@ impl Answers {
                                                             })
                                                         })
                                                     {
-                                                        // ponytail: the summary
-                                                        // holds the key, because
-                                                        // the recipe's
-                                                        // `customMounts` cannot
-                                                        // carry it yet. The
-                                                        // fisherman field is
-                                                        // phase 2 of plan 8G.
                                                         mount.passphrase = passphrase;
                                                     }
                                                 }
@@ -694,7 +679,7 @@ impl Answers {
                         start = 0;
                         left.clear();
                         fields = Self::seeded(payload, Given::default(), prompt)?
-                            .fields(payload, &scan, &disk, None, "")
+                            .fields(payload, &scan, &disk, None)
                     }
                     Leave::Back => {}
                 },
@@ -708,7 +693,7 @@ impl Answers {
                         start = 0;
                         left.clear();
                         fields = Self::seeded(payload, Given::default(), prompt)?
-                            .fields(payload, &scan, &disk, None, "")
+                            .fields(payload, &scan, &disk, None)
                     }
                     Leave::Back => {}
                 },
@@ -751,9 +736,6 @@ impl Answers {
                     tpm().exists(),
                     payload.luks_initramfs,
                 )?,
-                // No flag names a separate home, so a headless run installs
-                // without one.
-                data: Data::default(),
                 layout: None,
                 opened: Opened::Keep,
             });
@@ -766,7 +748,7 @@ impl Answers {
             user: given.user.unwrap_or_default(),
             password: given.password.unwrap_or_default(),
             encryption: Encryption {
-                // `named` refuses a flag naming a kind fisherman has not got.
+                // `named` refuses a flag naming a kind outside `KINDS`.
                 // Drawn as a row, the kind would be one the user cannot
                 // correct.
                 kind: match given.encryption {
@@ -778,7 +760,6 @@ impl Answers {
                 // `collect` chooses the interactive default, where the TPM and
                 // the image answer whether they can take it.
             },
-            data: Data::default(),
             layout: None,
             opened: Opened::Keep,
         })
@@ -793,18 +774,9 @@ impl Answers {
         scan: &Scan,
         disk: &str,
         layout: Option<&CustomLayout>,
-        var_size: &str,
     ) -> Vec<common::ui::Field> {
         use common::ui::Field;
-        let table = layout_table(
-            scan,
-            disk,
-            layout,
-            payload,
-            var_size,
-            !self.data.size.is_empty(),
-            self.encryption.kind != NONE,
-        );
+        let table = layout_table(scan, disk, layout, payload, self.encryption.kind != NONE);
         vec![
             Field::text(copy::ROW_HOSTNAME, &self.hostname),
             Field::text(copy::ROW_ACCOUNT, &self.user),
@@ -823,15 +795,6 @@ impl Answers {
                 &Field::action(copy::ROW_ENCRYPTION, shown(&self.encryption.kind)),
                 tpm().exists(),
                 payload.luks_initramfs,
-            ),
-            // No flag names the home row, so it opens unanswered. Answering it
-            // rebuilds the disk table, which draws the home partition this row
-            // decides.
-            Field::pick_change(copy::ROW_DATA, data_rows(payload.composefs), Some(0)),
-            Field::measure(
-                &format!("\u{2514}\u{2500} {}", copy::ROW_SIZE),
-                &self.data.size,
-                "GB",
             ),
             table.field(0, !disk.is_empty(), false),
             Field::secret(copy::ROW_PASSPHRASE, &self.encryption.passphrase),
@@ -867,9 +830,6 @@ impl Answers {
                     pin: String::new(),
                 },
                 false => {
-                    // The rows show descriptions and the recipe takes
-                    // fisherman's names. A recipe naming a description is
-                    // refused after the disk is gone.
                     let kind = written(&at(ROW_ENCRYPTION));
                     Encryption {
                         kind: kind.to_string(),
@@ -885,10 +845,6 @@ impl Answers {
                         },
                     }
                 }
-            },
-            data: match manual {
-                true => Data::default(),
-                false => chose(&at(ROW_DATA), &at(ROW_SIZE)),
             },
             opened: match manual {
                 true if opens => Opened::of(&at(ROW_ENCRYPTION)),
@@ -914,9 +870,6 @@ impl Answers {
                 shown(&self.encryption.kind).to_string(),
             ),
         ];
-        if self.layout.is_none() {
-            rows.push((copy::ROW_DATA.to_string(), data_said(&self.data)));
-        }
         // Names what the disk is about to be cut into. No question above
         // covers this half of what the install writes.
         match &self.layout {
@@ -959,21 +912,18 @@ impl Answers {
                     (mount.target.clone(), how)
                 }));
                 rows.extend(layout.opens.iter().map(|open| {
-                    (
-                        open.target.clone(),
-                        copy::opened(&open.partition, at_boot(open, self.opened)),
-                    )
+                    let how = at_boot(open, self.opened);
+                    let said = match open.target.as_str() {
+                        "/" => copy::opened_root(&open.partition, &payload.filesystem, how),
+                        _ => copy::opened(&open.partition, how),
+                    };
+                    (open.target.clone(), said)
                 }));
                 if let Some(chain) = copy::boot_chain(&payload.boot) {
                     rows.push(("boot chain".to_string(), chain.to_string()));
                 }
             }
-            None => rows.extend(copy::written_over(
-                &payload.bootloader,
-                &payload.filesystem,
-                &self.data.size,
-                self.encryption.kind != NONE,
-            )),
+            None => rows.extend(copy::written_over(&payload.bootloader, &payload.filesystem)),
         }
         rows
     }

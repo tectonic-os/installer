@@ -15,8 +15,8 @@ pub const INSTALL_PASSWORD: &str = "Password";
 pub const INSTALL_ENCRYPTION: &str = "Encryption type";
 pub const LUKS_PASSPHRASE: &str = "LUKS passphrase";
 pub const LUKS_PIN: &str = "LUKS PIN";
-/// The encryption row shows these five labels. `env::KINDS` pairs each one
-/// with the wire name fisherman's `--encryption` takes.
+/// The encryption row shows these labels. `env::KINDS` pairs each one with
+/// the name the `--encryption` flag takes.
 pub const ENC_NONE: &str = "none";
 /// Each label names what opens the container and what the recovery answer
 /// is. The encryption row and its list are only a few words wide.
@@ -31,22 +31,29 @@ pub const NO_TPM: &str = "No TPM available";
 pub const NO_LUKS_INITRAMFS: &str = "the image has not declared and proved `luks-initramfs`";
 pub const REMOVABLE: &str = "removable";
 
-// A bootc system puts `/home` at `/var/home`. A separate home is therefore a
-// separate `/var`, cut out of the install disk.
+/// The whole-disk plan formats the root with the recipe's `filesystem`, so a
+/// recipe without one has no root to write.
+pub const NO_ROOT_FILESYSTEM: &str =
+    "the recipe names no `filesystem`, and the whole-disk layout formats the root with it";
 
-pub const DATA_TOGETHER: &str = "System and Home on same partition";
-pub const DATA_SEPARATE: &str = "Separate Home partition";
-/// Fisherman wraps the `/var` it creates in the root's passphrase. A
-/// reinstall that keeps the disk opens the home partition with that same
-/// passphrase.
-pub const DATA_ENCRYPTED: &str = "encrypted with the root's passphrase";
+pub fn unknown_bootloader(bootloader: &str) -> String {
+    format!("the recipe's `bootloader` is {bootloader:?}; the installer lays out a disk for `grub2` or `systemd`")
+}
+
+pub fn unformattable(fstype: &str, target: &str) -> String {
+    format!("{target} cannot be formatted as {fstype:?}; the installer writes btrfs, ext4, xfs and fat32")
+}
+
 pub const CUSTOM_ROOT: &str = "still needs a / partition";
 /// Bootc installs its bootloader through the ESP. The installer cuts an ESP
 /// only on the whole-disk path, so a manual layout must supply one.
 pub const CUSTOM_ESP: &str = "still needs a /boot/efi partition";
-/// Fisherman's `customMounts` carries no passphrase field yet. The installer
-/// refuses a manual container here, because fisherman would otherwise refuse
-/// the recipe after the user had confirmed the wipe.
+/// bootc installs only onto an empty root, so a kept `/` would fail after the
+/// partition table was cut.
+pub const CUSTOM_ROOT_KEPT: &str = "the / partition must be formatted";
+/// The installer creates no container from a manual `luks` format. The editor
+/// refuses the format here, because `mkfs_args` would otherwise refuse it after
+/// the user had confirmed the wipe.
 pub const CUSTOM_LUKS_LATER: &str = "manual LUKS is not installed yet; use the whole disk";
 /// A composefs deployment is sealed with fs-verity. Only ext4 and btrfs
 /// carry fs-verity, so a manual root on xfs or ext3 cannot boot the image.
@@ -63,6 +70,20 @@ pub const CUSTOM_UNFORMATTED: &str = "a new partition has no filesystem chosen";
 /// that the install stopped and that the disk now needs recovering.
 pub fn table_already_changed(disk: &str) -> String {
     format!("the partition table on {disk} has already been changed")
+}
+
+pub fn no_mkfs(program: &str, fstype: &str) -> String {
+    format!("this live environment has no {program}, so it cannot format {fstype}")
+}
+
+pub fn root_type_needs_gpt(disk: &str) -> String {
+    format!(
+        "{disk} needs a GPT partition table, because this image finds its root by partition type"
+    )
+}
+
+pub fn account_name(user: &str) -> String {
+    format!("the username {user:?} needs lowercase letters, digits, `_` or `-`, starting with a letter or `_`")
 }
 
 pub fn table_changed(disk: &str) -> String {
@@ -107,6 +128,12 @@ pub fn custom_too_big(gb: u64) -> String {
 /// the summary says these two facts alone.
 pub fn opened(partition: &str, how: &str) -> String {
     format!("{partition}  {how}")
+}
+
+/// The confirmation names an opened root's format too, because the install
+/// erases the old system inside the container it keeps.
+pub fn opened_root(partition: &str, fstype: &str, how: &str) -> String {
+    format!("{partition}  format as {fstype} inside, {how}")
 }
 
 // The installer never re-keys a container the editor opened. The encryption
@@ -188,8 +215,8 @@ pub const ESP_TYPE: &str = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b";
 
 /// `systemd-cryptenroll` seals against the PCRs of the machine it runs on.
 /// The live installer's PCRs are not the installed machine's, so this unit
-/// enrols on the first boot. The key that opens the container is staged
-/// beside the unit and shredded once the token is in.
+/// enrols on the first boot. The key that opens the container and an optional
+/// PIN are staged beside the unit and shredded once the token is in.
 ///
 /// If `pcr_policy` is true, then the installed image carries a signed PCR 11
 /// policy and the token binds to that policy as well as to PCR 7.
@@ -219,14 +246,22 @@ pub const ESP_TYPE: &str = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b";
 /// command would hold `systemd-user-sessions` forever. The key file survives
 /// a hang and `ConditionPathExists` stays true, so every later boot would
 /// lose its getty and its display manager too.
-pub fn tpm2_unit(name: &str, key: &str, uuid: &str, pcr_policy: bool) -> String {
-    let enroll = match pcr_policy {
-        true => {
-            "--tpm2-pcrs=7 --tpm2-public-key=/run/systemd/tpm2-pcr-public-key.pem \
+pub fn tpm2_unit(name: &str, key: &str, pin: Option<&str>, uuid: &str, pcr_policy: bool) -> String {
+    let mut enroll = match pcr_policy {
+        true => "--tpm2-pcrs=7 --tpm2-public-key=/run/systemd/tpm2-pcr-public-key.pem \
                  --tpm2-signature=/run/systemd/tpm2-pcr-signature.json"
-        }
-        false => "--tpm2-pcrs=7",
+            .to_string(),
+        false => "--tpm2-pcrs=7".to_string(),
     };
+    if pin.is_some() {
+        enroll.push_str(" --tpm2-with-pin=yes");
+    }
+    let pin_credential = pin
+        .map(|path| format!("LoadCredential=cryptenroll.new-tpm2-pin:{path}\n"))
+        .unwrap_or_default();
+    let shred_pin = pin
+        .map(|path| format!("ExecStartPost=-/usr/bin/shred -u {path}\n"))
+        .unwrap_or_default();
     let credential = format!("{}/{}.cred", crate::CREDENTIAL_DIR, crate::CREDENTIAL);
     let marker = format!("{}/{}", crate::CREDENTIAL_DIR, crate::SLOT_FILE);
     let script = format!(
@@ -271,9 +306,11 @@ pub fn tpm2_unit(name: &str, key: &str, uuid: &str, pcr_policy: bool) -> String 
          TimeoutStartSec=120\n\
          StandardOutput=journal+console\n\
          StandardError=journal+console\n\
+         {pin_credential}\
          ExecStartPre=/bin/echo '{ENROLLING}'\n\
          ExecStart=/bin/bash -c '{script}'\n\
          ExecStartPost=-/usr/bin/shred -u {key}\n\
+         {shred_pin}\
          ExecStartPost=-/usr/bin/systemctl disable tect-tpm2-enroll-{name}.service\n\
          \n\
          [Install]\n\
@@ -427,7 +464,7 @@ pub fn layout_headings() -> [&'static str; 5] {
 /// widest thing each column can hold sets its number: `100.1 GB` and the
 /// automatic plan's `the rest` the size, `luks(closed)` the filesystem, the
 /// heading alone carries the format, the longest type word (`linux`) the type,
-/// and `/var/home` the mount.
+/// and `/boot/efi` the mount.
 pub fn layout_widths() -> [usize; 5] {
     [8, 12, 6, 5, 9]
 }
@@ -442,9 +479,8 @@ pub const USE_DISK_ACTION: &str = "Use this disk";
 pub const CHOOSE_KEYS: &str =
     "\u{2191}\u{2193} navigate \u{2022} \u{23ce}  confirm \u{2022} Esc back";
 pub const RESET_CHANGES: &str = "Reset changes";
-/// These four actions change the partition table itself. `sfdisk` enacts them
-/// before fisherman runs, so they are the only answers on this screen that
-/// touch the disk early.
+/// These four actions change the partition table itself. `cut_partitions`
+/// enacts them through `sfdisk` before the installer formats any partition.
 pub const DELETE_PART: &str = "Delete";
 pub const CLEAR_PARTS: &str = "Clear partitions";
 pub const CREATE_PART: &str = "Create partition";
@@ -481,8 +517,8 @@ pub const EFI_CELL: &str = "efi";
 
 /// The Assign list offers a partition these mount points. `assigns` leaves
 /// `/boot` out where the target's bootloader cannot read a separate one.
-pub fn mount_points() -> [&'static str; 6] {
-    ["/boot/efi", "/", "/boot", "/var", "/var/home", "/swap"]
+pub fn mount_points() -> [&'static str; 4] {
+    ["/boot/efi", "/", "/boot", "/swap"]
 }
 
 /// The `select partition format` overlay offers these, in the mock's order.
@@ -533,48 +569,25 @@ pub fn size_said(size: &str) -> String {
     format!("{:.1} GB", bytes / 1_000_000_000.0)
 }
 
-/// A home partition below 1.0 GB is not a home. The message names the answer
-/// a disk too small for two partitions still has.
-pub fn home_too_small(size: &str) -> String {
-    format!("{size} is below the 1.0 GB home minimum; keep system and home together")
-}
-
 /// Refuses a created root smaller than the room the image needs for the
 /// installed copy and the staged deployment beside it. The refusal belongs
-/// here because fisherman would discover it only after the disk had been cut
+/// here because `bootc` would discover it only after the disk had been cut
 /// and formatted, with the old partition table already gone.
 pub fn custom_root_too_small(gb: u64, reserve: u64) -> String {
     format!("a {gb} GB root is below the {reserve} GB this image needs")
 }
 
-pub fn home_too_big(size: &str, disk: &str) -> String {
-    format!("{size} of home leaves no room for the system on the {disk} disk; keep system and home together")
-}
-
 /// The confirmation spells out one row per partition the install will cut.
 /// No question on the form above covers these rows.
-pub fn written_over(
-    bootloader: &str,
-    filesystem: &str,
-    var: &str,
-    encrypted: bool,
-) -> Vec<(String, String)> {
+pub fn written_over(bootloader: &str, filesystem: &str) -> Vec<(String, String)> {
     // The rows follow the order the plan cuts in. The signed boot chain
     // belongs to the image and is drawn in the panel, so it is not a row
     // here.
-    let mut rows = vec![("esp".to_string(), format!("{}  fat32", size_said("2")))];
+    let esp = crate::ESP_GB.to_string();
+    let mut rows = vec![("esp".to_string(), format!("{}  fat32", size_said(&esp)))];
     if bootloader != "systemd" {
-        rows.push(("/boot".to_string(), format!("{}  ext4", size_said("2"))));
-    }
-    if !var.is_empty() {
-        let size = size_said(var);
-        rows.push((
-            "home".to_string(),
-            match encrypted {
-                true => format!("{size}  {filesystem}  {DATA_ENCRYPTED}"),
-                false => format!("{size}  {filesystem}"),
-            },
-        ));
+        let boot = crate::BOOT_GB.to_string();
+        rows.push(("/boot".to_string(), format!("{}  ext4", size_said(&boot))));
     }
     rows.push(("root".to_string(), format!("the rest  {filesystem}")));
     rows
@@ -588,8 +601,6 @@ pub const ROW_PASSWORD: &str = "password";
 pub const ROW_ENCRYPTION: &str = "encryption";
 pub const ROW_PASSPHRASE: &str = "passphrase";
 pub const ROW_PIN: &str = "PIN";
-pub const ROW_DATA: &str = "home directory";
-pub const ROW_SIZE: &str = "size";
 pub const PASSWORD_SET: &str = "set";
 /// A form has to show the difference between a value and a gap, so an
 /// unanswered field reads as this rather than as blank.
@@ -787,7 +798,7 @@ mod tests {
     #[test]
     fn uki_chains_are_visible_before_and_after_install() {
         assert!(super::boot_chain("uki-shim").is_some_and(|chain| chain.contains("Microsoft shim")));
-        assert!(!super::written_over("systemd", "ext4", "", false)
+        assert!(!super::written_over("systemd", "ext4")
             .iter()
             .any(|(name, _)| name == "boot chain"));
         assert!(super::next_steps_setup().contains("setup mode"));
@@ -803,7 +814,7 @@ mod tests {
     /// guards against.
     #[test]
     fn a_pcr_policy_tpm2_unit_names_the_embedded_files() {
-        let policy = super::tpm2_unit("root", "/etc/tect/tpm2-enroll-root.key", "u", true);
+        let policy = super::tpm2_unit("root", "/etc/tect/tpm2-enroll-root.key", None, "u", true);
         assert!(policy.contains("--tpm2-pcrs=7"), "{policy}");
         assert!(
             policy.contains("--tpm2-public-key=/run/systemd/tpm2-pcr-public-key.pem"),
@@ -813,16 +824,18 @@ mod tests {
             policy.contains("--tpm2-signature=/run/systemd/tpm2-pcr-signature.json"),
             "{policy}"
         );
-        let other = super::tpm2_unit("root", "/etc/tect/tpm2-enroll-root.key", "u", false);
+        let other = super::tpm2_unit("root", "/etc/tect/tpm2-enroll-root.key", None, "u", false);
         assert!(other.contains("--tpm2-pcrs=7"), "{other}");
         assert!(!other.contains("tpm2-pcr-public-key"), "{other}");
+        assert!(!other.contains("tpm2-with-pin"), "{other}");
+        assert!(!other.contains("new-tpm2-pin"), "{other}");
     }
 
     /// Without the ordering, the unit races `getty@tty1` and prints over a
     /// login prompt the user may already be typing into.
     #[test]
     fn a_tpm2_unit_runs_before_any_login_and_says_so() {
-        let unit = super::tpm2_unit("root", "/etc/tect/tpm2-enroll-root.key", "u", false);
+        let unit = super::tpm2_unit("root", "/etc/tect/tpm2-enroll-root.key", None, "u", false);
         assert!(
             unit.contains("Before=systemd-user-sessions.service"),
             "{unit}"
@@ -847,7 +860,7 @@ mod tests {
     /// unit again.
     #[test]
     fn a_tpm2_unit_cleans_up_an_automatic_finalize() {
-        let unit = super::tpm2_unit("root", "/etc/tect/tpm2-enroll-root.key", "abcd", true);
+        let unit = super::tpm2_unit("root", "/etc/tect/tpm2-enroll-root.key", None, "abcd", true);
         assert!(unit.contains(&format!("\"{}\"", super::ESP_TYPE)), "{unit}");
         assert!(
             unit.contains("loader/credentials/cryptsetup.slot"),
@@ -871,20 +884,22 @@ mod tests {
     }
 
     #[test]
-    fn a_created_var_says_when_it_is_encrypted() {
-        let var = |encrypted: bool| {
-            super::written_over("grub2", "ext4", "200 GB", encrypted)
-                .into_iter()
-                .find(|(name, _)| name == "home")
-                .expect("a home row")
-                .1
-        };
-        assert!(var(true).contains(super::DATA_ENCRYPTED), "{}", var(true));
-        assert!(
-            !var(false).contains(super::DATA_ENCRYPTED),
-            "{}",
-            var(false)
+    fn a_pin_unit_loads_and_shreds_the_pin() {
+        let unit = super::tpm2_unit(
+            "root",
+            "/etc/tect/tpm2-enroll-root.key",
+            Some("/etc/tect/tpm2-enroll-root.pin"),
+            "abcd",
+            false,
         );
-        assert!(super::DATA_ENCRYPTED.chars().count() < 60);
+        assert!(unit.contains("--tpm2-with-pin=yes"), "{unit}");
+        assert!(
+            unit.contains("LoadCredential=cryptenroll.new-tpm2-pin:/etc/tect/tpm2-enroll-root.pin"),
+            "{unit}"
+        );
+        assert!(
+            unit.contains("ExecStartPost=-/usr/bin/shred -u /etc/tect/tpm2-enroll-root.pin"),
+            "{unit}"
+        );
     }
 }

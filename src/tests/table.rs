@@ -457,9 +457,13 @@ fn a_created_device_with_no_node_beside_it_takes_the_part_branch() {
 /// install and leaves a machine that does not boot.
 #[test]
 fn a_created_esp_is_cut_as_an_efi_partition() {
-    assert_eq!(super::created_type("/boot/efi"), "U");
-    assert_eq!(super::created_type("/"), "L");
-    assert_eq!(super::created_type(""), "L");
+    let at = |target: &str| Created {
+        target: target.to_string(),
+        ..Default::default()
+    };
+    assert_eq!(super::created_type(&at("/boot/efi")), "U");
+    assert_eq!(super::created_type(&at("/")), "L");
+    assert_eq!(super::created_type(&at("")), "L");
 }
 
 /// The cut runs against a real `sfdisk`, on a file-backed GPT. `sfdisk`
@@ -690,7 +694,7 @@ fn the_cut_writes_the_table_the_screen_drew() {
 /// A size no free region can hold stops the install before the first write.
 /// `sfdisk` accepts an oversized request, shrinks the partition and exits 0,
 /// so a root quietly smaller than the user asked for would otherwise reach
-/// fisherman on a disk that had already been cut. The table is compared whole
+/// `bootc` on a disk that had already been cut. The table is compared whole
 /// afterwards, because the refusal has to come before the deletes.
 #[test]
 fn a_create_bigger_than_the_free_region_stops_the_install() {
@@ -1204,7 +1208,7 @@ fn a_cut_whose_node_never_appears_stops_the_install() {
 
 /// A layout that plans no delete and no create runs no `sfdisk` at all. The
 /// disk named here does not exist, so any `sfdisk` call or disk lock would
-/// fail. A layout that only assigns and formats reaches fisherman with the
+/// fail. A layout that only assigns and formats reaches `bootc` with the
 /// partition table it found.
 #[test]
 fn a_layout_that_cuts_nothing_writes_no_partition_table() {

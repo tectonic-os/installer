@@ -1,10 +1,9 @@
 use super::*;
 
-/// The five fisherman takes: the name it is written as, the description the
-/// screen shows, and what that one costs. The two whose name ends in
-/// `passphrase` are two it refuses the recipe without one, `tpm2-luks-pin`
-/// the one it refuses without a PIN, and `tpm2-luks` hands back a recovery
-/// key of its own.
+/// Each entry pairs the flag's name, the screen's description and the detail
+/// drawn under its menu choice. A kind whose name ends in `passphrase`
+/// needs a passphrase. `tpm2-luks-pin` needs a PIN. `tpm2-luks` and
+/// `tpm2-luks-pin` take a recovery key that `layout::seal` generates.
 pub(crate) const KINDS: [(&str, &str, &str); 5] = [
     (NONE, copy::ENC_NONE, ""),
     ("tpm2-luks", copy::ENC_TPM2, ""),

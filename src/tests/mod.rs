@@ -1,10 +1,9 @@
 pub(crate) use super::*;
 use std::io::Write as _;
 
+mod account;
 mod answers;
 mod automatic;
-mod backend;
-mod boot;
 mod cli;
 mod discover;
 mod disks;
@@ -13,6 +12,7 @@ mod esp;
 mod etcwrite;
 mod fdisk;
 mod form;
+mod layout;
 mod lock;
 mod panel;
 mod payload;
@@ -52,6 +52,7 @@ fn scratch(name: &str) -> PathBuf {
 fn a_payload() -> Payload {
     let payload = Payload {
         recipe: "/mnt/tect/install-recipe.json".into(),
+        install: an_install_recipe(),
         image: "ghcr.io/tectonic-os/deb2:latest".to_string(),
         hostname: "deb2".to_string(),
         filesystem: "ext4".to_string(),
@@ -75,6 +76,22 @@ fn a_payload() -> Payload {
         .set(Vec::new())
         .expect("entries nothing has read yet");
     payload
+}
+
+fn an_install_recipe() -> InstallRecipe {
+    InstallRecipe {
+        image: "ghcr.io/tectonic-os/deb2:latest".to_string(),
+        target_imgref: "ghcr.io/tectonic-os/deb2:latest".to_string(),
+        composefs: false,
+        generic: false,
+        bootloader: "grub2".to_string(),
+        filesystem: "ext4".to_string(),
+        hostname: "deb2".to_string(),
+        groups: vec!["sudo".to_string()],
+        stores: vec!["/var/lib/tectonic/store".to_string()],
+        boot: String::new(),
+        luks_initramfs: true,
+    }
 }
 
 /// Holds the payload `a_payload` describes with the ESP entries one image

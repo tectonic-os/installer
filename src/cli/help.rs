@@ -8,8 +8,10 @@ payload the media carries rather than from a registry. The tool that builds an
 image and the binary that writes it to a disk are separate repositories,
 released apart.
 
-`fisherman` is the backend and does the partitioning, the LUKS work and the
-`bootc install`; this finds the payload, completes its recipe and hands it over.
+It finds the payload, cuts and formats the disk, creates and opens the LUKS
+containers, and runs `bootc install to-filesystem` from the payload's image
+through `podman`. It then writes the hostname, the account and the unlock
+configuration into the installed deployment.
 
 On installer media this runs as `tect-installer.service` on `tty1`, under
 kmscon where the base has it and on the kernel console where it does not. The
@@ -78,19 +80,19 @@ pub(super) const NOTES: &str = r#"Notes:
 - **Esc on the form itself is a question, not an exit**, and so is Ctrl+C
   anywhere: keep going, start again from the first question, or leave to a
   shell. Only the third leaves, and it exits 0 having touched nothing.
-- Encryption is fisherman's, and the two forms whose name ends in `passphrase`
-  are the two it refuses the recipe without one; `tpm2-luks-pin` is the one it
-  refuses without a PIN, typed and confirmed the same way. The `tpm2-` forms
-  are not drawn at all on a machine with no `/dev/tpmrm0`. For
-  `tpm2-luks` and `tpm2-luks-pin` fisherman prints a recovery key once, and the
-  install echoes it on a line of its own: it is the only copy there will ever
-  be. The PIN is typed at every unlock, on top of the TPM policy: a stolen
-  machine gets neither the automatic unlock a bare TPM gives nor an offline
-  attack on a passphrase.
-- Fisherman writes a JSON event per line. On a terminal they are drawn as a
-  bar with the step under it and the last few messages in a bounded pane under
-  that; with no terminal each one is rendered as a line, `[ 45%] 7/12 install
-  OS`, over whatever else it prints. **The bar's two ends differ by glyph as
+- The two forms whose name ends in `passphrase` wait for a passphrase before
+  `Install`, and `tpm2-luks-pin` waits for a PIN, typed and confirmed the same
+  way. The `tpm2-` forms are not drawn at all on a machine with no
+  `/dev/tpmrm0`. For `tpm2-luks` and `tpm2-luks-pin` the installer formats the
+  containers with a generated recovery key and shows it once at the end on the
+  last screen or on stdout, so the user has to record it. A staged copy stays
+  inside the encrypted root until the first boot enrols the TPM, and the
+  enrolment deletes it. The PIN is typed at every unlock, on top of the TPM
+  policy. A stolen machine still needs the PIN, so the TPM cannot unlock it
+  alone and an attacker has no passphrase to attack offline.
+- The installer reads `bootc`'s output a line at a time. On a terminal the
+  lines go into a bounded pane under a bar that keeps moving while `bootc` is
+  silent; with no terminal each line is printed as it arrives. **The bar's two ends differ by glyph as
   well as by colour**, so a console that drops the colour escapes still reads a
   partial bar.
 - **The whole of that output is written to `tect-install.log`**, which is what
@@ -118,12 +120,11 @@ pub(super) const NOTES: &str = r#"Notes:
   a missing one fails naming its flag, and there is no default disk. The hostname
   defaults to the name the payload carries, and an unset `--encryption` installs
   unencrypted.
-- The password is hashed with `openssl passwd -6` before it reaches the recipe,
-  and the completed recipe is written `0600` under `$TMPDIR`. Fisherman hands the
-  field to `chpasswd`, and only a `$`-prefixed crypt string takes its `-e`
-  branch: a plaintext one goes through PAM and dies after the OS is already on
-  the disk.
-- `user.groups` is merged rather than replaced. The group in the emitted recipe
-  is the *target's* admin group, `sudo` on Debian and `wheel` on Fedora, and
-  `useradd` refuses the whole call when it is handed a group the target has not
-  got."#;
+- The installer hashes the password with `openssl passwd -6` before it changes
+  the disk, so a password `openssl` cannot hash stops the run with the disk
+  untouched. `useradd --password` writes the hash into the installed
+  deployment, and no file receives the plaintext.
+- `user.groups` names the *target's* admin group, `sudo` on Debian and `wheel`
+  on Fedora. The installer skips a listed group the installed deployment has
+  not got and warns, because `useradd` refuses the whole call when it receives
+  one."#;

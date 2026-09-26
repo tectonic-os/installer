@@ -14,12 +14,9 @@ fn the_luks_window_opens_on_the_kind_in_its_own_list() {
 }
 
 /// Every kind carries two strings for one answer. This walks all five from
-/// the drawn description to the name the recipe holds.
+/// the drawn description to the name the installer holds.
 #[test]
-fn every_shown_description_is_written_as_the_name_fisherman_takes() {
-    let root = scratch("kinds");
-    let recipe = root.join(RECIPE);
-    std::fs::write(&recipe, EMITTED).expect("a recipe");
+fn every_shown_description_is_read_as_the_installer_kind() {
     for (name, label, _) in KINDS {
         let answers = Answers {
             disk: "/dev/vda".to_string(),
@@ -32,20 +29,17 @@ fn every_shown_description_is_written_as_the_name_fisherman_takes() {
                 passphrase: "opensesame".to_string(),
                 pin: "4321".to_string(),
             },
-            data: Data::default(),
             layout: None,
         };
-        let fields = answers.fields(&a_payload(), &Scan::default(), "/dev/vda", None, "");
+        let fields = answers.fields(&a_payload(), &Scan::default(), "/dev/vda", None);
         assert_eq!(fields[ROW_ENCRYPTION].value(), label);
         let read = Answers::of(&fields, "/dev/vda".to_string(), None);
         assert_eq!(read.encryption.kind, name);
-        let done = complete(&recipe, &read).expect("a completed recipe");
-        let encryption = json::field(&done, "encryption").expect("an encryption");
-        assert_eq!(json::text(encryption, "type").as_deref(), Some(name));
+        assert_eq!(read.encryption.kind, name);
         // The summary says the description back, because that is what the
         // user picked.
         assert_eq!(shown(name), label);
-        // The flag path takes fisherman's name for the same kind.
+        // The flag path takes the same wire name.
         let flagged = ask_encryption(
             Some(name.to_string()),
             Some("opensesame".to_string()),
@@ -57,81 +51,6 @@ fn every_shown_description_is_written_as_the_name_fisherman_takes() {
         .expect("one of the five");
         assert_eq!(flagged.kind, name);
     }
-    let _ = std::fs::remove_dir_all(&root);
-}
-
-/// The home row offers two answers. Only the separate answer reads back a
-/// size, which is what tells the two apart.
-#[test]
-fn the_home_row_offers_together_or_a_partition_of_its_own() {
-    let rows = data_rows(false);
-    let labels: Vec<&str> = rows.iter().map(|row| row.label.as_str()).collect();
-    assert_eq!(labels, [copy::DATA_TOGETHER, copy::DATA_SEPARATE]);
-    assert!(rows.iter().all(|row| row.available));
-    assert!(chose(copy::DATA_TOGETHER, "20 GB").size.is_empty());
-    assert_eq!(chose(copy::DATA_SEPARATE, "20 GB").size, "20 GB");
-    assert_eq!(data_said(&Data::default()), copy::DATA_TOGETHER);
-    assert_eq!(
-        data_said(&Data {
-            size: "20 GB".to_string()
-        }),
-        copy::DATA_SEPARATE
-    );
-    // A composefs target hides the separate answer rather than cutting a
-    // `/var` the boot never mounts.
-    let locked = data_rows(true);
-    assert_eq!(locked[0].label, copy::DATA_TOGETHER);
-    assert!(!locked[0].hidden);
-    assert_eq!(locked[1].label, copy::DATA_SEPARATE);
-    assert!(locked[1].hidden);
-}
-
-/// A separate home is written as fisherman's `varDisk` size. The size the
-/// screen holds is written in whole GB.
-#[test]
-fn a_separate_home_writes_a_size_and_sharing_the_root_writes_nothing() {
-    let root = scratch("var");
-    let recipe = root.join(RECIPE);
-    std::fs::write(&recipe, EMITTED).expect("a recipe");
-    let written = |data: Data, kind: &str| {
-        let answers = Answers {
-            disk: "/dev/vda".to_string(),
-            hostname: "deb2".to_string(),
-            user: "tect".to_string(),
-            password: "hunter2".to_string(),
-            opened: Opened::Keep,
-            encryption: Encryption {
-                kind: kind.to_string(),
-                passphrase: String::new(),
-                pin: String::new(),
-            },
-            data,
-            layout: None,
-        };
-        complete(&recipe, &answers).expect("a completed recipe")
-    };
-    let held = |doc: &Json, key: &str| {
-        json::field(doc, "varDisk")
-            .and_then(|var| json::field(var, key))
-            .map(|value| value.render().trim().to_string())
-    };
-
-    let sized = written(chose(copy::DATA_SEPARATE, "200 GB"), NONE);
-    assert_eq!(held(&sized, "size").as_deref(), Some("\"200GB\""));
-    // An unencrypted root writes no `encrypt` key at all, which fisherman
-    // reads as an unencrypted home.
-    assert_eq!(held(&sized, "encrypt"), None);
-
-    // Under an encrypted root the home partition carries `encrypt`, and
-    // fisherman opens it with the root's passphrase.
-    let encrypted = written(chose(copy::DATA_SEPARATE, "200 GB"), "luks-passphrase");
-    assert_eq!(held(&encrypted, "encrypt").as_deref(), Some("true"));
-
-    // A shared home writes nothing, so a `var-disk` the image declared
-    // stands as `emit::recipe` wrote it.
-    assert!(json::field(&written(Data::default(), NONE), "varDisk").is_none());
-    assert!(json::field(&written(Data::default(), "tpm2-luks"), "varDisk").is_none());
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// A machine with no TPM marks its three `tpm2-` rows unavailable and
@@ -181,8 +100,8 @@ fn the_tpm_forms_are_hidden_where_there_is_no_tpm() {
     );
 }
 
-/// A kind fisherman does not take is refused before the user is asked
-/// anything. The refusal names the five kinds fisherman does take.
+/// The installer refuses a kind outside `KINDS` before it asks the user. The
+/// refusal names each kind in `KINDS`.
 #[test]
 fn an_encryption_no_backend_takes_is_refused_by_name() {
     let refused = ask_encryption(
@@ -363,51 +282,4 @@ fn a_key_on_the_root_needs_an_encrypted_root() {
     assert!(row(&encrypted, copy::OPENED_KEEP)
         .detail
         .starts_with("its slots could not be read"));
-}
-
-/// The summary's home row names the answer the user picked. The size sits
-/// on the home partition's own row under it.
-#[test]
-fn the_home_answer_reads_as_together_or_separate() {
-    assert_eq!(data_said(&Data::default()), copy::DATA_TOGETHER);
-    let separate = chose(copy::DATA_SEPARATE, "200 GB");
-    assert_eq!(data_said(&separate), copy::DATA_SEPARATE);
-    // The separate answer keeps the size fisherman cuts the home to.
-    assert_eq!(separate.size, "200 GB");
-}
-
-/// The installer hands the payload's sealing to the home row, so a composefs
-/// target hides the answer that cuts a `/var` its boot never mounts. A
-/// non-composefs payload still offers it.
-#[test]
-fn a_composefs_target_hides_the_separate_home_answer() {
-    let answers = Answers {
-        disk: "/dev/vda".to_string(),
-        hostname: "deb2".to_string(),
-        user: "tect".to_string(),
-        password: "hunter2".to_string(),
-        opened: Opened::Keep,
-        encryption: Encryption {
-            kind: NONE.to_string(),
-            passphrase: String::new(),
-            pin: String::new(),
-        },
-        data: Data::default(),
-        layout: None,
-    };
-    let separate_hidden = |composefs: bool| -> bool {
-        let mut payload = a_payload();
-        payload.composefs = composefs;
-        let fields = answers.fields(&payload, &Scan::default(), "/dev/vda", None, "");
-        let common::ui::Field::Pick { options, .. } = &fields[ROW_DATA] else {
-            panic!("the home row is a pick");
-        };
-        options
-            .iter()
-            .find(|choice| choice.label == copy::DATA_SEPARATE)
-            .expect("the separate answer keeps its index")
-            .hidden
-    };
-    assert!(separate_hidden(true));
-    assert!(!separate_hidden(false));
 }
