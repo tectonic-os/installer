@@ -15,16 +15,18 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       # The title comes from the pull request author, so it reaches the script
-      # through the environment and never through the script text.
+      # through the environment and never through the script text. The squash
+      # merge appends ` (#<number>)`, so a title of 64 characters keeps the
+      # subject on `main` within 72.
       - name: Check the title is a typed subject
         env:
           TITLE: ${{ github.event.pull_request.title }}
         run: |
           re='^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([[:lower:][:digit:]-]+\))?: [^[:upper:][:space:]].*[^.[:space:]]$'
-          if [[ $TITLE =~ $re ]] && ((${#TITLE} <= 72)); then
+          if [[ $TITLE =~ $re ]] && ((${#TITLE} <= 64)); then
             exit 0
           fi
-          echo "::error::The title must be '<type>(<scope>): <description>', at most 72 characters."
+          echo "::error::The title must be '<type>(<scope>): <description>', at most 64 characters."
           echo "The type is feat, fix, docs, style, refactor, perf, test, build, ci, chore or revert."
           echo "The scope is optional and lowercase. The description starts lowercase and has no trailing period."
           exit 1
