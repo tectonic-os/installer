@@ -4,6 +4,9 @@
     "config:best-practices",
   ],
 
+  // The pull request title check requires a typed subject, and Renovate
+  // otherwise guesses the commit style from the history.
+  "semanticCommits": "enabled",
   "rebaseWhen": "never",
   "timezone": "Etc/UTC",
   "schedule": ["before 6am"],
