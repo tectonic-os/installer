@@ -1,0 +1,30 @@
+name: PR title
+
+# A squash merge makes the pull request title the commit subject on `main`.
+# The check has its own workflow because it must rerun when the user edits the
+# title, and the lint and build workflows must not rerun on every edit of the
+# description.
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions: {}
+
+jobs:
+  typed-title:
+    runs-on: ubuntu-24.04
+    steps:
+      # The title comes from the pull request author, so it reaches the script
+      # through the environment and never through the script text.
+      - name: Check the title is a typed subject
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          re='^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([[:lower:][:digit:]-]+\))?: [^[:upper:][:space:]].*[^.[:space:]]$'
+          if [[ $TITLE =~ $re ]] && ((${#TITLE} <= 72)); then
+            exit 0
+          fi
+          echo "::error::The title must be '<type>(<scope>): <description>', at most 72 characters."
+          echo "The type is feat, fix, docs, style, refactor, perf, test, build, ci, chore or revert."
+          echo "The scope is optional and lowercase. The description starts lowercase and has no trailing period."
+          exit 1
