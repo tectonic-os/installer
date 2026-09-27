@@ -1,0 +1,37 @@
+name: Scorecard
+
+# The Scorecard API accepts published results from `push` and `schedule` on
+# the default branch alone.
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '30 1 * * 6'
+
+permissions: read-all
+
+jobs:
+  analysis:
+    runs-on: ubuntu-24.04
+    permissions:
+      # The SARIF upload writes to code scanning.
+      security-events: write
+      # `publish_results` signs the result with the workflow's OIDC token.
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Run the analysis
+        uses: ossf/scorecard-action@2d1146689b8cda280b9bc96326124645441f03bc # v2.4.4
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          publish_results: true
+
+      - name: Upload to code scanning
+        uses: github/codeql-action/upload-sarif@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
+        with:
+          sarif_file: results.sarif
