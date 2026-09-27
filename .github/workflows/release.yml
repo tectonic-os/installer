@@ -24,6 +24,7 @@ jobs:
           - runner: ubuntu-24.04
             arch: x86_64
             machine: x86-64
+            rustup-sha256: dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71
           # A native arm runner, because a dynamic glibc target carries no crt
           # objects of its own for the linker to borrow. `tect`'s workflow
           # cross-links aarch64 for exactly that reason and this one cannot.
@@ -33,6 +34,7 @@ jobs:
           - runner: ubuntu-24.04-arm
             arch: aarch64
             machine: ARM aarch64
+            rustup-sha256: 15f6e4ce9f583b929c996c91562bad6d4454f3281de858b02cdfdef615fac433
     runs-on: ${{ matrix.runner }}
     # glibc is backward compatible, so the build base sets the floor. stream10
     # at glibc 2.39 is the oldest of the nine rpm rows in `COVERAGE.md`, eight
@@ -42,11 +44,26 @@ jobs:
     # `RUN /usr/bin/tect-installer --version` catches as a failed ISO build.
     container: quay.io/centos-bootc/centos-bootc:stream10
     steps:
-      # The base image carries no git and no cargo, so this runs before the
-      # checkout that needs one of them. binutils is named rather than left to
-      # arrive under cargo, because the floor assertion below needs `readelf`.
+      # The base image carries no git, so this runs before the checkout. The
+      # floor assertion below needs `readelf` from binutils.
       - name: Install the build tools
-        run: dnf install -y --setopt=install_weak_deps=False cargo git jq file tar gzip binutils
+        run: dnf install -y --setopt=install_weak_deps=False gcc git jq file tar gzip binutils
+
+      # The base image's own cargo moves with the base image. rustup installs
+      # the version `rust-toolchain.toml` names instead, and rustup-init is
+      # held to its published hash.
+      - name: Install rustup
+        env:
+          ARCH: ${{ matrix.arch }}
+          RUSTUP_SHA256: ${{ matrix.rustup-sha256 }}
+        run: |
+          set -euo pipefail
+          curl -fsSLo /tmp/rustup-init \
+            "https://static.rust-lang.org/rustup/archive/1.29.1/${ARCH}-unknown-linux-gnu/rustup-init"
+          echo "${RUSTUP_SHA256}  /tmp/rustup-init" | sha256sum -c -
+          chmod +x /tmp/rustup-init
+          /tmp/rustup-init -y --profile minimal --default-toolchain none
+          echo "${HOME}/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -65,8 +82,15 @@ jobs:
           [ "${GITHUB_REF_NAME}" = "v${version}" ] \
             || { echo "tag ${GITHUB_REF_NAME} does not match package version ${version}" >&2; exit 1; }
 
+      # Each tool is a pinned version, and `--locked` builds it against its own
+      # lockfile. cargo checks every crate against the crates.io index checksum.
+      - name: Install the SBOM tools
+        run: cargo install --locked cargo-auditable@0.7.6 cargo-cyclonedx@0.5.9
+
+      # `cargo auditable` embeds the resolved dependency list in the binary, so
+      # a scanner reads what shipped from the shipped file itself.
       - name: Build
-        run: cargo build --profile dist --locked
+        run: cargo auditable build --profile dist --locked
 
       - name: Package with checksums
         env:
@@ -110,12 +134,20 @@ jobs:
           # `emit/installer.Containerfile` passes for GitHub source archives.
           # Against a single top-level file that flag extracts nothing and
           # still exits 0.
-          tar -czf "$asset" -C target/dist tect-installer
+          # The file time and owner are fixed and gzip records no time, so two
+          # builds of one commit give one tarball. The checkout belongs to
+          # another user than this container's, so git is told it is safe.
+          epoch="$(git -c safe.directory="$PWD" log -1 --format=%ct)"
+          tar --mtime="@${epoch}" --owner=0 --group=0 --numeric-owner \
+            -cf - -C target/dist tect-installer | gzip -9n > "$asset"
           # Bare hex, because this is the value the media pins as a build
           # argument beside its tacklebox pin. Nothing pipes
           # this file into `sha256sum -c`, which rejects a line with no
           # filename on it.
           sha256sum "$asset" | cut -d' ' -f1 > "${asset}.sha256"
+          cargo cyclonedx --format json --spec-version 1.5 \
+            --target "${ARCH}-unknown-linux-gnu" \
+            --override-filename "tect-installer-v${version}-${ARCH}-linux-gnu.cdx"
 
       - name: Hand the tarball to the release job
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -124,6 +156,7 @@ jobs:
           path: |
             tect-installer-v*-linux-gnu.tar.gz
             tect-installer-v*-linux-gnu.tar.gz.sha256
+            tect-installer-v*-linux-gnu.cdx.json
           if-no-files-found: error
 
   # One release carries both architectures, so neither build job creates it.
@@ -143,13 +176,47 @@ jobs:
         with:
           merge-multiple: true
 
-      # Attestation runs here rather than in the build jobs, because one call
-      # covers both tarballs and the id-token scope stays out of a job that
-      # builds crates.
+      # A tarball that lost the embedded list would still pass every check
+      # in the build job, so the list is read back out of a shipped binary.
+      - name: Read the dependency list back
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          tar -xzOf "tect-installer-v${version}-x86_64-linux-gnu.tar.gz" tect-installer > shipped
+          objcopy --dump-section .dep-v0=dep-v0.z shipped
+          python3 -c 'import sys, zlib; sys.stdout.buffer.write(zlib.decompress(open("dep-v0.z", "rb").read()))' \
+            | jq -e --arg v "$version" \
+              '.packages | (map(select(.root and .name == "installer" and .version == $v)) | length == 1) and length > 1'
+          rm shipped dep-v0.z
+
+      # Attestation runs here rather than in the build jobs, so the id-token
+      # scope stays out of a job that builds crates.
       - name: Attest the tarballs
-        uses: actions/attest-build-provenance@bd77c077858b8d561b7a36cbe48ef4cc642ca39d # v2.2.2
+        id: provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: tect-installer-v*-linux-gnu.tar.gz
+
+      # Scorecard's Signed-Releases check reads release assets alone, so the
+      # provenance bundle ships as one beside the attestation GitHub stores. The
+      # copy runs before the SBOM attestations, so the asset holds the
+      # provenance bundle alone.
+      - name: Keep the provenance bundle
+        env:
+          BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
+        run: cp "$BUNDLE" "tect-installer-${GITHUB_REF_NAME}.sigstore.json"
+
+      - name: Attest the x86_64 SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: tect-installer-${{ github.ref_name }}-x86_64-linux-gnu.tar.gz
+          sbom-path: tect-installer-${{ github.ref_name }}-x86_64-linux-gnu.cdx.json
+
+      - name: Attest the aarch64 SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: tect-installer-${{ github.ref_name }}-aarch64-linux-gnu.tar.gz
+          sbom-path: tect-installer-${{ github.ref_name }}-aarch64-linux-gnu.cdx.json
 
       - name: Create release
         env:
@@ -161,4 +228,5 @@ jobs:
           gh release create "${GITHUB_REF_NAME}" \
             --title "${GITHUB_REF_NAME}" \
             --generate-notes \
-            tect-installer-v*-linux-gnu.tar.gz tect-installer-v*-linux-gnu.tar.gz.sha256
+            tect-installer-v*-linux-gnu.tar.gz tect-installer-v*-linux-gnu.tar.gz.sha256 \
+            tect-installer-v*-linux-gnu.cdx.json "tect-installer-${GITHUB_REF_NAME}.sigstore.json"
