@@ -1,0 +1,38 @@
+# git-cliff writes a release's section of CHANGELOG.md from the typed subjects
+# on `main`. Only the types a user of a release acts on get a section.
+[changelog]
+header = """
+# Changelog
+
+Each release's section is written from the typed subjects on `main`.
+"""
+body = """
+
+{% if version %}## {{ version | trim_start_matches(pat="v") }} ({{ timestamp | date(format="%Y-%m-%d") }}){% else %}## Unreleased{% endif %}
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | striptags | trim }}
+{% for commit in commits %}
+- {% if commit.scope %}{{ commit.scope }}: {% endif %}{{ commit.message | split(pat="\n") | first | trim }}{% endfor %}
+{% endfor %}"""
+footer = """
+
+## 0.1.5 and earlier
+
+The history before 0.1.6 predates the typed pull request titles. The notes on
+each GitHub release record what it changed.
+"""
+trim = true
+
+[git]
+conventional_commits = true
+filter_unconventional = true
+# The first parser that matches a subject wins, so the dependency parser sits
+# above `fix`, which Renovate uses for a runtime dependency.
+commit_parsers = [
+    { message = "^(fix|chore|build)\\(deps\\)", group = "<!-- 4 -->Dependencies" },
+    { message = "^feat", group = "<!-- 0 -->Features" },
+    { message = "^fix", group = "<!-- 1 -->Fixes" },
+    { message = "^perf", group = "<!-- 2 -->Performance" },
+    { message = "^revert", group = "<!-- 3 -->Reverts" },
+    { message = ".", skip = true },
+]

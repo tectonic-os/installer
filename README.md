@@ -56,6 +56,20 @@ is asked.
 pinned by commit, never by version. A change there is a commit and a pin bump
 here.
 
+## Releases
+
+`tect-installer` is before 1.0. A minor version may break what the one before it
+accepted, and only the latest release is supported. `CHANGELOG.md` lists what
+each release changed.
+
+Each architecture's tarball ships with its `.sha256` and a CycloneDX SBOM,
+`.cdx.json`. The binary carries its own dependency list, embedded by `cargo
+auditable`, which `cargo audit bin` and other scanners read. GitHub holds a
+build provenance attestation and an SBOM attestation for each tarball, and the
+provenance bundle also ships as `tect-installer-v<version>.sigstore.json`:
+
+    gh attestation verify tect-installer-v<version>-x86_64-linux-gnu.tar.gz -R tectonic-os/installer
+
 ## Licence
 
 Apache 2.0. See [LICENSE](LICENSE).
