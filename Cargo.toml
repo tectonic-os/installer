@@ -1,6 +1,6 @@
 [package]
 name = "installer"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2021"
 # The lowest toolchain the crate builds and tests on. CI tests on it, so a
 # dependency bump that needs a newer one fails there.
