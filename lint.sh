@@ -12,24 +12,7 @@ fi
 # without editing this, the way `tect`'s own lint covers a new workspace member.
 mapfile -t crate_src < <(find . -path ./target -prune -o -name '*.rs' -type f -print)
 
-# This binary installs a bootc image and knows nothing about the tool that
-# built one. A `tect` dependency here would put the repository model back in
-# the installer and undo the split, and `common` is the only way to ratatui.
-# clap owns the command line, so parsing, help, refusals and `docs/commands.md`
-# read one tree.
-#
-# `normal,dev,build` and not `normal` alone: a `[dev-dependencies]` entry is
-# exactly how the coupling would come back, since the split's own history is
-# that what looked like 83 production references were 72 test fixtures. That is
-# also why `clap-markdown` is named here: it renders the reference in a test
-# alone, so no renderer reaches the dist binary.
-deps=$(cargo tree -e normal,dev,build --depth 1 --prefix none | awk 'NR > 1 {print $1}' | sort -u | tr '\n' ' ')
-if [ "$deps" != "clap clap-markdown common libc " ]; then
-    echo "lint: the dependency floor moved, it is now: $deps" >&2
-    exit 1
-fi
-
-# Belt and braces over the floor above, in every form a reach can take: an
+# This check covers every source form that the dependency graph cannot see: an
 # import, a renaming import, an `extern crate`, or a path written at the call
 # site whose import sits in another file.
 if grep -nE '\buse +(::)?tect\b|\bextern +crate +tect\b|(^|[^A-Za-z0-9_:])tect::' "${crate_src[@]}"; then
@@ -58,6 +41,9 @@ cargo fmt --check || {
     exit 1
 }
 echo "lint: the source is clean"
+
+cargo deny --locked check bans licenses sources
+echo "lint: the dependency policy accepts the locked graph"
 
 cargo test --quiet
 echo "lint: the installer does what it did"
