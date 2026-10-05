@@ -6,11 +6,8 @@ use super::*;
 #[test]
 #[ignore]
 fn holds_a_lock_for_another_process_to_find() {
-    let Ok(path) = std::env::var("TECT_TEST_LOCK") else {
-        // `cargo test -- --ignored` runs this holder with no lock path set.
-        // The holder then returns instead of sleeping for 30 seconds.
-        return;
-    };
+    let path = std::env::var("TECT_TEST_LOCK")
+        .expect("the lock-holder fixture is run only by its parent test");
     let _held = hold_at(Path::new(&path)).expect("the child takes the lock");
     std::fs::write(format!("{path}.taken"), "").expect("the child reports it");
     std::thread::sleep(std::time::Duration::from_secs(30));

@@ -3,11 +3,8 @@ use crate::fdisk::{partname, read_table};
 
 /// Writes a GPT onto a sparse file with `sfdisk` and returns its path. The
 /// file grows no device nodes, so a reader is all these cases exercise.
-fn gpt(name: &str, script: &str) -> Option<String> {
-    let sfdisk = Command::new("sfdisk").arg("--version").output().ok()?;
-    if !sfdisk.status.success() {
-        return None;
-    }
+fn gpt(name: &str, script: &str) -> String {
+    require_sfdisk();
     let root = scratch(name);
     let image = root.join("disk.img");
     std::fs::File::create(&image)
@@ -28,7 +25,7 @@ fn gpt(name: &str, script: &str) -> Option<String> {
         .write_all(script.as_bytes())
         .expect("the starting table");
     assert!(child.wait().expect("sfdisk").success());
-    Some(disk)
+    disk
 }
 
 /// The two backends must agree on one disk, because the append arithmetic and
@@ -37,9 +34,7 @@ fn gpt(name: &str, script: &str) -> Option<String> {
 #[test]
 fn the_libfdisk_reader_agrees_with_the_sfdisk_reader() {
     let script = "label: gpt\nsize=20M, name=one\nsize=20M, name=two\nsize=20M, name=three\n";
-    let Some(disk) = gpt("fdisk-agree", script) else {
-        return;
-    };
+    let disk = gpt("fdisk-agree", script);
     let dumped = super::sfdisk_table(&disk).expect("the sfdisk table");
     let read = read_table(&disk).expect("the libfdisk table");
     assert_eq!(read, dumped);
@@ -52,9 +47,7 @@ fn the_libfdisk_reader_agrees_with_the_sfdisk_reader() {
 #[test]
 fn a_hole_and_a_reused_slot_read_the_same_through_both() {
     let script = "label: gpt\nsize=20M, name=one\nsize=20M, name=two\nsize=20M, name=three\n";
-    let Some(disk) = gpt("fdisk-hole", script) else {
-        return;
-    };
+    let disk = gpt("fdisk-hole", script);
     let mut child = Command::new("sfdisk")
         .args(["-q", "--delete", &disk, "2"])
         .stdout(Stdio::null())
@@ -76,12 +69,7 @@ fn a_hole_and_a_reused_slot_read_the_same_through_both() {
 /// because a zero span refuses every create for no room.
 #[test]
 fn an_unpartitioned_disk_reads_as_room_through_both() {
-    let Ok(sfdisk) = Command::new("sfdisk").arg("--version").output() else {
-        return;
-    };
-    if !sfdisk.status.success() {
-        return;
-    }
+    require_sfdisk();
     let root = scratch("fdisk-blank");
     let image = root.join("disk.img");
     std::fs::File::create(&image)
@@ -179,9 +167,7 @@ fn an_unreadable_device_is_a_refusal_and_not_an_empty_table() {
 #[test]
 fn a_dos_label_reads_the_conservative_span_through_both() {
     let script = "label: dos\nsize=20M\nsize=20M\n";
-    let Some(disk) = gpt("fdisk-dos", script) else {
-        return;
-    };
+    let disk = gpt("fdisk-dos", script);
     let dumped = super::sfdisk_table(&disk).expect("the sfdisk table");
     let read = read_table(&disk).expect("the libfdisk table");
     assert_eq!(read, dumped);
@@ -196,9 +182,7 @@ fn a_dos_label_reads_the_conservative_span_through_both() {
 #[test]
 fn a_dos_extended_container_is_a_slot_through_both() {
     let script = "label: dos\nsize=20M, type=83\ntype=5\n";
-    let Some(disk) = gpt("fdisk-extended", script) else {
-        return;
-    };
+    let disk = gpt("fdisk-extended", script);
     let dumped = super::sfdisk_table(&disk).expect("the sfdisk table");
     let read = read_table(&disk).expect("the libfdisk table");
     assert_eq!(read, dumped);
@@ -222,7 +206,17 @@ struct Loop(String);
 
 impl Drop for Loop {
     fn drop(&mut self) {
-        let _ = Command::new("losetup").args(["-d", &self.0]).status();
+        let result = Command::new("losetup").args(["-d", &self.0]).status();
+        let failure = match result {
+            Ok(status) if status.success() => return,
+            Ok(status) => format!("losetup -d {} exited {status}", self.0),
+            Err(error) => format!("cannot run losetup -d {}: {error}", self.0),
+        };
+        if std::thread::panicking() {
+            eprintln!("test cleanup: {failure}");
+        } else {
+            panic!("test cleanup: {failure}");
+        }
     }
 }
 
