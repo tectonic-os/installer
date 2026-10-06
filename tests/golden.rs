@@ -1,8 +1,7 @@
 //! Drives the installer's screens on a real terminal. Each drawn frame is
-//! compared byte for byte against a committed golden.
+//! compared byte for byte against a committed snapshot.
 //!
-//! Regenerate the goldens with `UPDATE_GOLDEN=1 cargo test`, then read the
-//! diff.
+//! Review changed snapshots with `cargo insta review`.
 
 use std::path::{Path, PathBuf};
 
@@ -21,52 +20,28 @@ fn empty(name: &str) -> PathBuf {
     dir
 }
 
-fn compare(name: &str, file: &str, actual: &str) {
-    let actual = actual.replace(env!("CARGO_PKG_VERSION"), "{version}");
-    let path = crate_dir().join("tests/golden").join(name).join(file);
-    if std::env::var_os("UPDATE_GOLDEN").is_some() {
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, actual).unwrap();
-        return;
-    }
-    let expected = std::fs::read_to_string(&path)
-        .unwrap_or_else(|err| panic!("{}: {err}\nrun UPDATE_GOLDEN=1 cargo test", path.display()));
-    assert!(
-        expected == actual,
-        "{} changed. Rerun with UPDATE_GOLDEN=1 and read the diff.\n{}",
-        path.display(),
-        first_difference(&expected, &actual)
-    );
+fn snapshot_path(name: &str, file: &str) -> PathBuf {
+    crate_dir()
+        .join("tests/golden")
+        .join(name)
+        .join(format!("{file}.snap"))
 }
 
-/// Reports where two goldens first part, as escaped bytes either side of the
-/// offset.
-///
-/// A transcript golden is mostly escape sequences, so a bare equality failure
-/// names no bytes at all. A CI runner also discards its checkout when the job
-/// ends, so a golden regenerated there never reaches the reader. The
-/// difference travels in the failure message instead.
-fn first_difference(expected: &str, actual: &str) -> String {
-    let at = expected
-        .bytes()
-        .zip(actual.bytes())
-        .position(|(a, b)| a != b)
-        .unwrap_or(expected.len().min(actual.len()));
-    let window = |s: &str| {
-        let from = at.saturating_sub(60);
-        let to = (at + 60).min(s.len());
-        s.get(from..to)
-            .unwrap_or("<not a char boundary>")
-            .escape_debug()
-            .to_string()
-    };
-    format!(
-        "first difference at byte {at} of {} expected, {} actual\n  expected: {}\n    actual: {}",
-        expected.len(),
-        actual.len(),
-        window(expected),
-        window(actual)
-    )
+fn snapshot_text(name: &str, file: &str) -> String {
+    insta::Snapshot::from_file(&snapshot_path(name, file))
+        .unwrap_or_else(|err| panic!("{}: {err}", snapshot_path(name, file).display()))
+        .as_text()
+        .expect("the golden is a text snapshot")
+        .to_string()
+}
+
+fn assert_golden(name: &str, file: &str, actual: &str) {
+    let actual = actual.replace(env!("CARGO_PKG_VERSION"), "{version}");
+    let mut settings = insta::Settings::clone_current();
+    settings.set_snapshot_path(Path::new("golden").join(name));
+    settings.set_prepend_module_to_snapshot(false);
+    settings.set_omit_expression(true);
+    settings.bind(|| insta::assert_snapshot!(file, actual));
 }
 
 /// Runs one installer flow on a real terminal and compares the drawn frames
@@ -88,6 +63,9 @@ fn drawn_flow(name: &str, dir: &Path, command: &str, after: &str, steps: &[&[u8]
         // The host's own COLUMNS would reach the pty and redraw at that
         // width, so the golden pins the drawn width it captured.
         .env("COLUMNS", "80")
+        // The transcript snapshot retains terminal styling, so a shell's
+        // NO_COLOR must not reach the pty.
+        .env_remove("NO_COLOR")
         // A TPM on the host adds the `tpm2-` kinds to the encryption window,
         // so the probe is pointed at a path no machine carries.
         .env("TECT_TPM", "/nonexistent")
@@ -159,7 +137,7 @@ fn drawn_flow(name: &str, dir: &Path, command: &str, after: &str, steps: &[&[u8]
 
     let text = String::from_utf8_lossy(&raw);
     let stable = text.rsplit_once(after).unwrap().1;
-    compare(
+    assert_golden(
         name,
         "transcript.txt",
         &format!("{after}{stable}==== exit 0\n"),
@@ -236,15 +214,8 @@ fn commands_doc() {
         .show_footer(false);
     let rendered =
         clap_markdown::help_markdown_command_custom(&installer::cli::Args::command(), &options);
-    if std::env::var_os("UPDATE_GOLDEN").is_some() {
-        std::fs::write(&path, rendered).unwrap();
-        return;
-    }
     let doc = std::fs::read_to_string(&path).expect("docs/commands.md exists");
-    assert!(
-        doc == rendered,
-        "docs/commands.md is stale. Rerun with UPDATE_GOLDEN=1 and read the diff"
-    );
+    assert!(doc == rendered, "docs/commands.md is stale");
 }
 
 /// `tect-installer.service` owns tty1, but the serial console and the other
@@ -634,9 +605,7 @@ esac
     // The password the walk typed is not in the transcript. A serial console
     // keeps that transcript and a failed install is read back from it, so a
     // secret drawn into a frame would outlive the run.
-    let transcript =
-        std::fs::read_to_string(crate_dir().join("tests/golden/flow-install-drawn/transcript.txt"))
-            .unwrap();
+    let transcript = snapshot_text("flow-install-drawn", "transcript.txt");
     assert!(!transcript.contains("hunter2"), "{transcript}");
     // The panel was drawn from the fixture rather than from this machine.
     // ratatui writes the cells a frame changed in runs, so some panel lines

@@ -10,7 +10,8 @@ a vulnerability.
 A pull request merges after these pass, beside GitHub's CodeQL analysis:
 
 - `lint` runs `./lint.sh`: the dependency policy, the boundary greps, rustfmt,
-  the tests, and a check that every message names the program.
+  the tests, and a check that every message names the program. Changed
+  snapshots are reviewed with `cargo insta review`.
 - `msrv` runs `cargo nextest run --locked --profile ci` on the `rust-version`
   that `Cargo.toml` states.
 - `typed-title` checks the pull request title.
