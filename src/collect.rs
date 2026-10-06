@@ -301,7 +301,7 @@ impl Answers {
                                 // Clear answers for partitions the user never
                                 // opened, so the question names how many.
                                 Some(PartAction::Clear) => {
-                                    if common::ui::confirm(
+                                    if common::ui::confirm_or_no(
                                         &copy::clear_all(chosen.len()),
                                         copy::USE_DISK_ACTION,
                                         copy::GO_BACK,

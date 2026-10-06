@@ -367,10 +367,9 @@ pub(crate) enum Leave {
     Shell,
 }
 
-/// Whether a widget's error is the user leaving. Esc is the other half of
-/// leaving, and it arrives as a `None`.
+/// Ctrl+C leaves a raw-mode widget; Escape cancels a prompt-backed widget.
 pub(crate) fn leaving(err: &str) -> bool {
-    err == common::ui::INTERRUPTED
+    err == common::ui::INTERRUPTED || common::prompt::cancelled(err)
 }
 
 /// What a leave key asks before it leaves.
