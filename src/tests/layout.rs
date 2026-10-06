@@ -2,17 +2,9 @@ use super::*;
 
 /// Cuts a whole-disk plan into a sparse image and returns the `sfdisk --dump`
 /// partition lines. The backing file carries an old `dos` table, so each case
-/// also proves the cut replaces the old table. The helper returns `None` on a
-/// host with no `sfdisk`.
-fn cut_whole_disk(
-    name: &str,
-    payload: &Payload,
-    kind: &str,
-) -> Option<(CustomLayout, Vec<String>)> {
-    let sfdisk = Command::new("sfdisk").arg("--version").output().ok()?;
-    if !sfdisk.status.success() {
-        return None;
-    }
+/// also proves the cut replaces the old table.
+fn cut_whole_disk(name: &str, payload: &Payload, kind: &str) -> (CustomLayout, Vec<String>) {
+    require_sfdisk();
     let root = scratch(name);
     let image = root.join("disk.img");
     std::fs::File::create(&image)
@@ -50,7 +42,7 @@ fn cut_whole_disk(
         .map(|line| line.to_uppercase())
         .collect();
     let _ = std::fs::remove_dir_all(&root);
-    Some((layout, lines))
+    (layout, lines)
 }
 
 fn a_payload_for(bootloader: &str, composefs: bool) -> Payload {
@@ -71,9 +63,7 @@ const LINUX_TYPE: &str = "0FC63DAF-8483-4772-8E79-3D69D8477DE4";
 fn a_grub_disk_is_cut_into_an_esp_a_boot_and_a_root() {
     for composefs in [false, true] {
         let payload = a_payload_for("grub2", composefs);
-        let Some((layout, lines)) = cut_whole_disk("whole-grub", &payload, NONE) else {
-            return;
-        };
+        let (layout, lines) = cut_whole_disk("whole-grub", &payload, NONE);
         assert_eq!(lines.len(), 3, "{lines:?}");
         assert!(lines[0].contains(ESP_TYPE) && lines[0].contains("EFI-SYSTEM"));
         assert!(lines[1].contains(LINUX_TYPE) && lines[1].contains("\"BOOT\""));
@@ -97,9 +87,7 @@ fn a_grub_disk_is_cut_into_an_esp_a_boot_and_a_root() {
 fn a_systemd_boot_disk_is_cut_into_an_esp_and_a_root() {
     for (composefs, root_type) in [(false, LINUX_TYPE), (true, ROOT_GUID)] {
         let payload = a_payload_for("systemd", composefs);
-        let Some((_, lines)) = cut_whole_disk("whole-sdboot", &payload, NONE) else {
-            return;
-        };
+        let (_, lines) = cut_whole_disk("whole-sdboot", &payload, NONE);
         assert_eq!(lines.len(), 2, "{lines:?}");
         assert!(lines[0].contains(ESP_TYPE));
         assert!(
@@ -115,9 +103,7 @@ fn a_systemd_boot_disk_is_cut_into_an_esp_and_a_root() {
 #[test]
 fn the_whole_disk_root_takes_the_rest_of_the_disk() {
     let payload = a_payload_for("grub2", false);
-    let Some((layout, _)) = cut_whole_disk("whole-rest", &payload, NONE) else {
-        return;
-    };
+    let (layout, _) = cut_whole_disk("whole-rest", &payload, NONE);
     let root = layout.creates.last().expect("a root");
     // 32 GiB is 34.36 GB, and the ESP and `/boot` take 4 GB of it.
     assert_eq!(root.gb, 30);
@@ -129,9 +115,7 @@ fn the_whole_disk_root_takes_the_rest_of_the_disk() {
 fn an_encrypted_answer_seals_the_root_alone() {
     for kind in ["luks-passphrase", "tpm2-luks", "tpm2-luks-pin"] {
         let payload = a_payload_for("grub2", false);
-        let Some((layout, _)) = cut_whole_disk("whole-sealed", &payload, kind) else {
-            return;
-        };
+        let (layout, _) = cut_whole_disk("whole-sealed", &payload, kind);
         let sealed: Vec<&str> = layout
             .creates
             .iter()
@@ -141,9 +125,7 @@ fn an_encrypted_answer_seals_the_root_alone() {
         assert_eq!(sealed, ["/"], "{kind}");
     }
     let payload = a_payload_for("grub2", false);
-    let Some((layout, _)) = cut_whole_disk("whole-plain", &payload, NONE) else {
-        return;
-    };
+    let (layout, _) = cut_whole_disk("whole-plain", &payload, NONE);
     assert!(layout.creates.iter().all(|create| !create.encrypt));
 }
 

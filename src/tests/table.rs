@@ -476,12 +476,7 @@ fn a_created_esp_is_cut_as_an_efi_partition() {
 /// not show that nothing was cut.
 #[test]
 fn a_delete_the_cut_cannot_number_takes_nothing_off_the_disk() {
-    let Ok(sfdisk) = Command::new("sfdisk").arg("--version").output() else {
-        return;
-    };
-    if !sfdisk.status.success() {
-        return;
-    }
+    require_sfdisk();
     let root = scratch("cut-unnamed-delete");
     let image = root.join("disk.img");
     std::fs::File::create(&image)
@@ -559,12 +554,7 @@ size=20M, name=two
 /// nodes, and `cut_partitions` waits for those separately.
 #[test]
 fn the_cut_writes_the_table_the_screen_drew() {
-    let Ok(sfdisk) = Command::new("sfdisk").arg("--version").output() else {
-        return;
-    };
-    if !sfdisk.status.success() {
-        return;
-    }
+    require_sfdisk();
     let root = scratch("cut-table");
     let image = root.join("disk.img");
     // `set_len` leaves the image sparse. `sfdisk` writes the table only, so
@@ -698,12 +688,7 @@ fn the_cut_writes_the_table_the_screen_drew() {
 /// afterwards, because the refusal has to come before the deletes.
 #[test]
 fn a_create_bigger_than_the_free_region_stops_the_install() {
-    let Ok(sfdisk) = Command::new("sfdisk").arg("--version").output() else {
-        return;
-    };
-    if !sfdisk.status.success() {
-        return;
-    }
+    require_sfdisk();
     let root = scratch("cut-clamp");
     let image = root.join("small.img");
     std::fs::File::create(&image)
@@ -752,12 +737,7 @@ fn a_create_bigger_than_the_free_region_stops_the_install() {
 /// `disk_table` reads no names.
 #[test]
 fn the_cut_writes_the_planned_names() {
-    let Ok(sfdisk) = Command::new("sfdisk").arg("--version").output() else {
-        return;
-    };
-    if !sfdisk.status.success() {
-        return;
-    }
+    require_sfdisk();
     let root = scratch("cut-names");
     let image = root.join("disk.img");
     std::fs::File::create(&image)
@@ -1038,12 +1018,7 @@ fn a_plan_that_outgrew_its_room_is_refused_before_the_cut() {
 /// Clearing writes a fresh `label: gpt`, so both disks come out GPT.
 #[test]
 fn a_blank_and_a_dos_disk_are_cut_as_gpt() {
-    let Ok(sfdisk) = Command::new("sfdisk").arg("--version").output() else {
-        return;
-    };
-    if !sfdisk.status.success() {
-        return;
-    }
+    require_sfdisk();
     let root = scratch("cut-fresh-label");
     let creates = vec![
         Created {
@@ -1177,12 +1152,7 @@ fn an_existing_node_is_taken_at_once() {
 /// stops before the recipe names a node that is not there.
 #[test]
 fn a_cut_whose_node_never_appears_stops_the_install() {
-    let Ok(sfdisk) = Command::new("sfdisk").arg("--version").output() else {
-        return;
-    };
-    if !sfdisk.status.success() {
-        return;
-    }
+    require_sfdisk();
     let root = scratch("cut-node-wait");
     let image = root.join("disk.img");
     std::fs::File::create(&image)

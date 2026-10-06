@@ -45,7 +45,7 @@ echo "lint: the source is clean"
 cargo deny --locked check bans licenses sources
 echo "lint: the dependency policy accepts the locked graph"
 
-cargo test --quiet
+cargo nextest run --locked
 echo "lint: the installer does what it did"
 
 # `PROGRAM` is a constant interpolated into `format!`, so a message built as a

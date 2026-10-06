@@ -46,6 +46,14 @@ fn scratch(name: &str) -> PathBuf {
     root
 }
 
+fn require_sfdisk() {
+    let output = Command::new("sfdisk")
+        .arg("--version")
+        .output()
+        .expect("sfdisk is required by the disk tests");
+    assert!(output.status.success(), "sfdisk --version failed");
+}
+
 /// Holds the payload the form tests ask their questions against. The image,
 /// hostname, filesystem and bootloader match `EMITTED`, which describes the
 /// same Debian target.
