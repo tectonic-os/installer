@@ -37,3 +37,4 @@ codegen-units = 1
 # Renders `docs/commands.md` in a test, so it never reaches a dist binary.
 [dev-dependencies]
 clap-markdown = "0.1.5"
+insta = { version = "1.49.0", default-features = false }
