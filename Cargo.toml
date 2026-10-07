@@ -17,7 +17,7 @@ clap = { version = "4.6.7", features = ["derive"] }
 libc = "0.2"
 # Pinned by rev, never by version. A change in `common` is a commit there and
 # a bump here, which keeps the rev that was built with visible in `Cargo.lock`.
-common = { git = "https://github.com/tectonic-os/common", rev = "44e9c4aa56617c326c2a03892ffe732dab56ad82" }
+common = { git = "https://github.com/tectonic-os/common", rev = "595582033fa256f95325ade9eaa7a7be5810e218" }
 
 [profile.release]
 opt-level = 1
@@ -37,4 +37,5 @@ codegen-units = 1
 # Renders `docs/commands.md` in a test, so it never reaches a dist binary.
 [dev-dependencies]
 clap-markdown = "0.1.5"
+common = { git = "https://github.com/tectonic-os/common", rev = "595582033fa256f95325ade9eaa7a7be5810e218", features = ["test-support"] }
 insta = { version = "1.49.0", default-features = false }

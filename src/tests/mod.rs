@@ -18,6 +18,7 @@ mod panel;
 mod payload;
 mod recipe;
 mod run;
+mod screens;
 mod table;
 mod volumes;
 

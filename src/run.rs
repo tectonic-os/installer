@@ -4,9 +4,6 @@ use std::io::{BufRead as _, Write as _};
 const TICK: std::time::Duration = std::time::Duration::from_millis(120);
 const STORAGE_CONF: &str = "/etc/containers/storage.conf";
 
-/// Prepares the disk and runs the payload's own bootc over it, drawing bootc's
-/// output into a bounded region and writing all of it to a file.
-///
 /// A failed draw never fails the install, so no call here uses `?` on the
 /// region.
 pub fn run(payload: &Payload, answers: &mut Answers, prompt: &Prompt) -> Result<(), String> {
@@ -34,8 +31,7 @@ pub fn run(payload: &Payload, answers: &mut Answers, prompt: &Prompt) -> Result<
     })
 }
 
-/// Runs bootc over the prepared disk and writes the installed system. Every
-/// failure here comes after the cut, which `run` tells the user.
+/// Every failure here follows the disk cut, which `run` reports to the user.
 fn installed(
     payload: &Payload,
     answers: &mut Answers,
@@ -135,9 +131,8 @@ fn installed(
     let notes = arrange(payload, answers, &prepared.layout, password_hash)?;
     configure_boot_chain(&payload.image, &answers.disk, &payload.boot)?;
     render_menu(&payload.image, &answers.disk)?;
-    // The steps the last screen asks for are read from the firmware now
-    // rather than from the form's panel. A key enrolled while the install ran
-    // changes them.
+    // The final screen reads firmware again because a key enrolled during the
+    // install changes its remaining steps.
     let steps = next_steps(&payload.boot, &firmware(payload));
     let recovery = prepared.recovery.take();
     let volumes = match recovery.is_some() {
@@ -161,9 +156,8 @@ fn installed(
     )
 }
 
-/// Refuses missing host paths, and an image the stores lack, before the
-/// installer changes the partition table. The install runs with `--pull=never`,
-/// so a missing image would otherwise stop it after the cut.
+/// Host paths and image availability must be checked before the partition
+/// write because `--pull=never` would otherwise stop the install after the cut.
 fn validate_recipe(payload: &Payload) -> Result<(), String> {
     if !Path::new(STORAGE_CONF).is_file() {
         return Err(format!(
@@ -244,8 +238,8 @@ pub(crate) fn bootc_command(recipe: &InstallRecipe, karg: Option<&str>) -> Comma
     command
 }
 
-/// Gives bootc the root container before it writes the BLS entry. A signed UKI
-/// finds its root by partition type and carries no mutable kernel command line.
+/// A signed UKI finds its root by partition type and carries no mutable kernel
+/// command line, so bootc needs the root container before writing the BLS entry.
 fn root_luks_arg(layout: &CustomLayout, boot: &str) -> Result<Option<String>, String> {
     if !boot.is_empty() {
         return Ok(None);
@@ -277,14 +271,9 @@ fn recovery_volumes(answers: &Answers) -> Vec<String> {
     volumes
 }
 
-/// Draws the last screen. It carries the recovery key, which is on screen
-/// because it is deliberately in no file. It carries the steps the firmware
-/// still asks for. It offers the restart, because the stick is still in the
-/// machine and no other screen says what to do next. Where a first-boot
-/// enrolment is staged, it offers the automatic finalize beside the manual
-/// restart, and the automatic action writes the credential before restarting.
-/// `notes` states what arranging the opened containers owes about slots,
-/// which this says rather than does. `volumes` names what the key opens.
+/// The recovery key stays on screen because it is deliberately in no file.
+/// The restart remains explicit while the installation medium is attached.
+/// A staged first-boot enrolment must write its credential before restarting.
 pub(crate) fn finish(
     recovery: Option<&str>,
     log: Option<&Path>,
@@ -319,17 +308,7 @@ pub(crate) fn finish(
         &mut offered,
         |offered| {
             let rows = done_rows(recovery, log, steps, notes, volumes, offered);
-            let mut actions = Vec::new();
-            match offered {
-                Offered::Ready(_) => actions.push(Choice::new(copy::FINALIZE_AUTO, "")),
-                Offered::Unavailable(why) => {
-                    actions.push(Choice::new(copy::FINALIZE_AUTO, why.clone()).unavailable())
-                }
-                Offered::None => actions.push(Choice::new(copy::RESTART, "")),
-            }
-            if !matches!(offered, Offered::None) {
-                actions.push(Choice::new(copy::FINALIZE_MANUAL, ""));
-            }
+            let actions = done_actions(offered);
             common::ui::offer_over(copy::INSTALL_DONE, rows, &actions, copy::DONE_KEYS)
         },
         automatic::finalize,
@@ -337,10 +316,25 @@ pub(crate) fn finish(
     )
 }
 
-/// Runs the completion screen until an action ends it. A failed automatic
-/// finalize draws the screen again with the reason, because the recovery key
-/// the screen shows is in no file and a restart would leave the disk
-/// unopenable.
+/// Screen coverage reads these choices, so a new final action cannot bypass its
+/// snapshot.
+pub(crate) fn done_actions(offered: &Offered) -> Vec<Choice> {
+    let mut actions = Vec::new();
+    match offered {
+        Offered::Ready(_) => actions.push(Choice::new(copy::FINALIZE_AUTO, "")),
+        Offered::Unavailable(why) => {
+            actions.push(Choice::new(copy::FINALIZE_AUTO, why.clone()).unavailable())
+        }
+        Offered::None => actions.push(Choice::new(copy::RESTART, "")),
+    }
+    if !matches!(offered, Offered::None) {
+        actions.push(Choice::new(copy::FINALIZE_MANUAL, ""));
+    }
+    actions
+}
+
+/// A failed automatic finalize returns to the recovery key because restarting
+/// would leave the disk unopenable.
 pub(crate) fn choosing(
     offered: &mut Offered,
     mut draw: impl FnMut(&Offered) -> Result<Option<usize>, String>,
@@ -362,11 +356,8 @@ pub(crate) fn choosing(
     }
 }
 
-/// Builds the last screen's rows. They carry the key as text under its
-/// heading, the steps the firmware still asks for under their own, and where
-/// the log went. The key is the one row the user must copy by eye. Where a
-/// first-boot enrolment is staged, the rows end with what each action does,
-/// and the automatic action's window draws in the warning colour.
+/// The user must copy the recovery key by eye. A staged first-boot enrolment
+/// puts the automatic action in the warning colour.
 pub(crate) fn done_rows(
     recovery: Option<&str>,
     log: Option<&Path>,
@@ -441,9 +432,8 @@ pub(crate) fn restart() -> Result<(), String> {
     }
 }
 
-/// Takes the console. Every widget after this draws full screen under one
-/// title bar. A login banner and a discovery line sit above, and neither is
-/// worth the room.
+/// Full-screen widgets replace the login banner and discovery line because
+/// neither is worth the console space.
 pub fn own_screen(payload: &Payload, prompt: &Prompt) {
     if !prompt.draws() {
         return;

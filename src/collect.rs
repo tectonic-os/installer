@@ -1,10 +1,19 @@
 use super::*;
 
+/// Screen coverage reads this list, so a new form action cannot bypass its
+/// snapshot.
+pub(crate) fn install_actions() -> [&'static str; 4] {
+    [
+        copy::INSTALL,
+        copy::EXIT_SHELL,
+        copy::RESTART,
+        copy::SHUT_DOWN,
+    ]
+}
+
 impl Answers {
-    /// Asks the install screens in order, then asks the review over their
-    /// answers. Every leave key asks its own question first. `None` means the
-    /// user confirmed a leave, so the installer has written nothing and has
-    /// touched no disk.
+    /// `None` means the user confirmed a leave before the installer touched a
+    /// disk.
     pub fn collect(
         payload: &Payload,
         given: Given,
@@ -17,9 +26,8 @@ impl Answers {
         if !prompt.draws() {
             return Ok(Some(seeded));
         }
-        // Every disk the machine has, read once before the form draws. The
-        // screens render this and read no disk again, so a redraw cannot show
-        // a different disk than the last one.
+        // The installer reads every disk once before the form draws. A redraw
+        // then cannot show a different disk than the previous screen.
         let scan = Scan::read();
         let mut disk = seeded.disk.clone();
         // One found disk nothing is on yet makes the disk question answer
@@ -27,9 +35,9 @@ impl Answers {
         if disk.is_empty() {
             disk = scan.only_empty_disk().unwrap_or_default();
         }
-        // A disk whose partitions could not be read has no picture, so it is
-        // not an install target. A machine with no readable disk left stops
-        // the same way rather than drawing a form nothing can answer.
+        // An unreadable partition table has no picture, so the disk cannot be
+        // an install target. A machine with no readable disk stops before it
+        // draws an unanswerable form.
         if let Some(why) = scan.refusal(&disk) {
             return Err(why);
         }
@@ -54,23 +62,17 @@ impl Answers {
         // walk stays on the row the user left. `None` seeds it on the chosen
         // disk.
         let mut cursor: Option<usize> = None;
-        // Reopens the form on the disk table after the next pass rebuilds the
-        // rows around it. Opening a container makes the encryption row a
-        // question the manual form otherwise hides, which moves the table's
-        // row number.
+        // A disk-table answer must reopen by field because opening a container
+        // can insert an encryption row and move the table's row number.
         let mut reopen_on_table = false;
-        // Opens the table with its own cursor once, for the pass after the user
-        // answered a table row. The owner asked 2026-09-24 that an Assign,
-        // Format or Delete leave the selection on the partition it was made on.
+        // A table answer restores its own cursor once, so Assign, Format and
+        // Delete leave the selection on the affected partition.
         let mut focus_table = false;
-        // Names the row the form opens on. The disk table returns to its own
-        // row, because the top of the form is a long walk back through the
-        // setup rows above it.
+        // The form returns to the answered row because restarting at the top
+        // would repeat the setup rows above it.
         let mut start = 0;
-        // Records which password rows the user has typed in and left, carried
-        // across the form's reopens. An answer on the disk table or the layout
-        // row rebuilds `fields` and calls `form` again. A mismatched password
-        // pair keeps its red through that redraw.
+        // Password errors must survive the field rebuild caused by a disk-table
+        // or layout answer.
         let mut left: Vec<usize> = Vec::new();
         loop {
             // The layout row decides what the layout holds. A manual layout
@@ -82,17 +84,15 @@ impl Answers {
                 (true, _) => Some(CustomLayout::empty(&disk)),
                 (false, _) => None,
             };
-            // The chosen disk's partitions, from the scan. The table draws
-            // every disk from the scan, so nothing is read here.
             let chosen = scan
                 .get(&disk)
                 .map(|entry| entry.partitions.as_slice())
                 .unwrap_or(&[]);
             // `short_of` weighs the plan against the table the form drew, and
-            // re-takes the room refusal after any answer rather than only
-            // after a size is typed. Taking back a delete after a create was
-            // sized would otherwise leave a plan the disk cannot hold. The
-            // scan is what the user saw; `table_changed` at confirm remains
+            // re-takes the room refusal after every answer. Taking back a
+            // delete after a create was sized would otherwise leave a plan the
+            // disk cannot hold. The
+            // scan is what the user saw. `table_changed` at confirm remains
             // the guard against a disk that moved under the plan.
             let table_now = match manual && !disk.is_empty() {
                 true => Some(scan.table(&disk)?),
@@ -138,18 +138,11 @@ impl Answers {
                 None if manual => common::ui::Field::action(copy::ROW_ENCRYPTION, shown(&kind)),
                 None => common::ui::Field::action(copy::ROW_ENCRYPTION, shown(&kind)),
             };
-            // The disk table was just answered and the rows around it are
-            // rebuilt, so the form opens on the table's new row number.
             if reopen_on_table {
                 reopen_on_table = false;
                 start = ROW_TABLE;
             }
-            let actions = [
-                copy::INSTALL,
-                copy::EXIT_SHELL,
-                copy::RESTART,
-                copy::SHUT_DOWN,
-            ];
+            let actions = install_actions();
             let filled = common::ui::form(
                 &mut fields,
                 &actions,
@@ -201,9 +194,6 @@ impl Answers {
                         layout.confirmed = Some(state);
                     }
                     let warning = erase_warning(&payload.boot, &firmware(payload));
-                    // Asks the one question that costs the user a disk. The
-                    // installer asks it over the plan, and only once the form
-                    // is complete.
                     if common::ui::decide(
                         copy::INSTALLATION_SUMMARY,
                         &match &answers.layout {
@@ -230,8 +220,6 @@ impl Answers {
                 // shell takes another VT and the user can come back. Started
                 // by hand, the installer exits, so the user confirms first.
                 Ok(common::ui::Filled::Took(1)) => {
-                    // The shell takes another VT, so the installer keeps its
-                    // screen. The note names the key that comes back to it.
                     let note = copy::switch_note(console_vt().unwrap_or(1));
                     if common::ui::decide(
                         copy::EXIT_SHELL,
@@ -250,19 +238,16 @@ impl Answers {
                         switch_to_shell()?;
                     }
                 }
-                // Nothing is written yet, so the restart costs the user no disk.
+                // Restart is offered before any disk write, so it costs the
+                // user no disk state.
                 Ok(common::ui::Filled::Took(2)) => {
                     restart()?;
                     return Ok(None);
                 }
-                // Shut down is the last of the four actions, so it takes this arm.
                 Ok(common::ui::Filled::Took(_)) => {
                     power_off()?;
                     return Ok(None);
                 }
-                // The user answered the disk table. A disk row picks the disk,
-                // and a partition row answers through the popup the table
-                // opened for it.
                 Ok(common::ui::Filled::Table { row, item, child }) => {
                     cursor = Some(row);
                     reopen_on_table = true;
@@ -298,8 +283,8 @@ impl Answers {
                                         });
                                     }
                                 }
-                                // Clear answers for partitions the user never
-                                // opened, so the question names how many.
+                                // Answers are cleared for partitions the user
+                                // never opened, so the question names how many.
                                 Some(PartAction::Clear) => {
                                     if common::ui::confirm_or_no(
                                         &copy::clear_all(chosen.len()),
@@ -328,10 +313,9 @@ impl Answers {
                                     } else {
                                         let confirmed = match scan.get(at) {
                                             Some(entry) => confirm_disk(entry)?,
-                                            // A disk row comes from the scan, so
-                                            // this arm never runs. A miss has no
-                                            // picture to show and takes the disk
-                                            // as the row did.
+                                            // A missing scan entry has no
+                                            // picture to confirm, so the row's
+                                            // selection stands.
                                             None => true,
                                         };
                                         if confirmed {
@@ -374,10 +358,10 @@ impl Answers {
                                     // A created partition is offered the plain
                                     // formats. `short_of` refuses a manual
                                     // container with `CUSTOM_LUKS_LATER`.
-                                    // That rule reads `mounts`. A create is
-                                    // not a mount, so offering `luks` here
-                                    // would be a dead end with no refusal on
-                                    // screen.
+                                    // That rule reads `mounts`. A create
+                                    // bypasses that list, so offering `luks`
+                                    // here would leave a dead end with no
+                                    // on-screen refusal.
                                     let options = copy::plain_formats();
                                     let current = layout
                                         .as_ref()
@@ -404,7 +388,8 @@ impl Answers {
                                             // partition that was already
                                             // there. A point the new
                                             // filesystem cannot carry is
-                                            // cleared instead of left wrong.
+                                            // cleared to prevent an invalid
+                                            // pairing.
                                             if !create.target.is_empty()
                                                 && !fits(&create.target, &create.fstype)
                                             {
@@ -477,8 +462,6 @@ impl Answers {
                                     }
                                 }
                                 PartAction::Format => {
-                                    // The format overlay opens on the format the
-                                    // partition row already holds.
                                     let options = copy::format_options();
                                     let answer =
                                         layout.as_ref().and_then(|held| held.answer(partition));
@@ -499,18 +482,18 @@ impl Answers {
                                             // the installer asks what opens it
                                             // and then stages it.
                                             "luks" => {
-                                                // Opens on `tpm2-luks-passphrase`,
-                                                // the kind that unlocks from the
-                                                // TPM and still keeps a passphrase
-                                                // the user can be asked for.
+                                                // The picker opens on
+                                                // `tpm2-luks-passphrase` because it
+                                                // keeps both TPM and user access.
                                                 if let Some((_, passphrase, _)) = edit_luks(
                                                     KINDS[3].0,
                                                     "",
                                                     Some(&partition.device),
                                                     tpm().exists(),
                                                     payload.luks_initramfs,
-                                                    // A new container owes a key,
-                                                    // so `none` is left out.
+                                                    // A created container owes
+                                                    // a key, so `none` is left
+                                                    // out.
                                                     false,
                                                 )? {
                                                     place_format(
@@ -601,8 +584,6 @@ impl Answers {
                                         &found,
                                     ) {
                                         Ok(key) => key,
-                                        // Esc on the key screen returns to the
-                                        // disk table.
                                         Err(err) if leaving(&err) => continue,
                                         Err(err) => return Err(err),
                                     };
@@ -630,22 +611,20 @@ impl Answers {
                                             .retain(|open| open.partition != partition.device);
                                     }
                                 }
-                                // The partition popup offers neither action.
                                 PartAction::Clear | PartAction::Create => {}
                             }
                         }
                         _ => {}
                     }
                 }
-                // A changed pick row decides what the table under it draws.
-                // The loop rebuilds the table and the rows before the form is
-                // drawn again, and the form opens on the row the user answered.
+                // A changed pick row can alter the table below it, so the loop
+                // rebuilds all rows before redrawing. The form then opens on
+                // the row the user answered.
                 Ok(common::ui::Filled::Changed(row)) => {
                     start = row;
                 }
-                // The whole-disk encryption row opens a window. The user picks
-                // the kind there and types the passphrase that kind owes. A
-                // manual layout never reaches this arm.
+                // Manual layouts answer encryption per partition and never
+                // reach the whole-disk window.
                 Ok(common::ui::Filled::Opened(ROW_ENCRYPTION)) if layout.is_none() => {
                     let at = (!disk.is_empty())
                         .then(|| fdisk::partname(&disk, container_number(payload)));
@@ -702,16 +681,13 @@ impl Answers {
         }
     }
 
-    /// Fills every answer before the installer asks the user a question. With
-    /// a screen, the flags and the payload defaults seed the form and the form
-    /// asks. With no screen, a value no flag gave is a refusal naming the
-    /// flag.
+    /// Headless installation must refuse every missing flag before a disk
+    /// write, while an interactive form can ask for missing values.
     pub(crate) fn seeded(payload: &Payload, given: Given, prompt: &Prompt) -> Result<Self, String> {
         if !prompt.draws() {
             let disk = ask_disk(given.disk, None, prompt)?;
-            // A headless run writes the disk the flags name and draws no
-            // picture, so a disk whose partitions cannot be read stops here
-            // rather than under the write.
+            // A headless run has no disk picture, so an unreadable partition
+            // table must stop before the write.
             partitions(&disk)?;
             return Ok(Self {
                 disk,
@@ -742,8 +718,8 @@ impl Answers {
         }
         Ok(Self {
             disk: given.disk.unwrap_or_default(),
-            // The owner decided 2026-09-24 that the hostname starts blank. The
-            // payload's own name is not what the machine must be called.
+            // The payload names the image, while the hostname names the
+            // installed machine.
             hostname: given.hostname.unwrap_or_default(),
             user: given.user.unwrap_or_default(),
             password: given.password.unwrap_or_default(),
@@ -765,9 +741,6 @@ impl Answers {
         })
     }
 
-    /// Builds the form's rows in the order `ROW_*` names them. The passphrase
-    /// and the PIN ride here for the encryption window, and `asked` keeps both
-    /// out of the questions.
     pub(crate) fn fields(
         &self,
         payload: &Payload,
@@ -802,9 +775,7 @@ impl Answers {
         ]
     }
 
-    /// Reads the answers the form holds. `collect` calls it only once
-    /// `short_of` is empty, so every value here is one the user typed or
-    /// chose.
+    /// `collect` must call this only after `short_of` accepts every form value.
     pub(crate) fn of(
         fields: &[common::ui::Field],
         disk: String,
@@ -854,8 +825,7 @@ impl Answers {
         }
     }
 
-    /// Builds the rows the confirmation is asked over. The password is the one
-    /// answer that cannot read back as itself.
+    /// The password cannot read back on the confirmation screen.
     pub(crate) fn summary(&self, payload: &Payload) -> Vec<(String, String)> {
         let mut rows = vec![
             (copy::ROW_DISK.to_string(), self.disk.clone()),
@@ -870,8 +840,8 @@ impl Answers {
                 shown(&self.encryption.kind).to_string(),
             ),
         ];
-        // Names what the disk is about to be cut into. No question above
-        // covers this half of what the install writes.
+        // The summary must include disk changes because no form question above
+        // describes that half of the install.
         match &self.layout {
             Some(layout) => {
                 // Removals come first, because a partition that stops existing

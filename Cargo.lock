@@ -158,7 +158,7 @@ checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 [[package]]
 name = "common"
 version = "0.1.0"
-source = "git+https://github.com/tectonic-os/common?rev=44e9c4aa56617c326c2a03892ffe732dab56ad82#44e9c4aa56617c326c2a03892ffe732dab56ad82"
+source = "git+https://github.com/tectonic-os/common?rev=595582033fa256f95325ade9eaa7a7be5810e218#595582033fa256f95325ade9eaa7a7be5810e218"
 dependencies = [
  "libc",
  "ratatui",
