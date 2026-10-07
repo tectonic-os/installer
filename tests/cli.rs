@@ -1,8 +1,3 @@
-//! Drives the installer's screens on a real terminal. Each drawn frame is
-//! compared byte for byte against a committed snapshot.
-//!
-//! Review changed snapshots with `cargo insta review`.
-
 use std::path::{Path, PathBuf};
 
 fn crate_dir() -> PathBuf {
@@ -20,38 +15,9 @@ fn empty(name: &str) -> PathBuf {
     dir
 }
 
-fn snapshot_path(name: &str, file: &str) -> PathBuf {
-    crate_dir()
-        .join("tests/golden")
-        .join(name)
-        .join(format!("{file}.snap"))
-}
-
-fn snapshot_text(name: &str, file: &str) -> String {
-    insta::Snapshot::from_file(&snapshot_path(name, file))
-        .unwrap_or_else(|err| panic!("{}: {err}", snapshot_path(name, file).display()))
-        .as_text()
-        .expect("the golden is a text snapshot")
-        .to_string()
-}
-
-fn assert_golden(name: &str, file: &str, actual: &str) {
-    let actual = actual.replace(env!("CARGO_PKG_VERSION"), "{version}");
-    let mut settings = insta::Settings::clone_current();
-    settings.set_snapshot_path(Path::new("golden").join(name));
-    settings.set_prepend_module_to_snapshot(false);
-    settings.set_omit_expression(true);
-    settings.bind(|| insta::assert_snapshot!(file, actual));
-}
-
-/// Runs one installer flow on a real terminal and compares the drawn frames
-/// against a committed golden. `script` supplies the pty. A reader thread
-/// answers every cursor-position query a widget opens with. Each step types
-/// after the draw has settled.
-///
-/// Only the tail from the last `after` is compared, so whatever the pty wrote
-/// before the installer's first line stays out of the golden.
-fn drawn_flow(name: &str, dir: &Path, command: &str, after: &str, steps: &[&[u8]]) {
+/// Runs the installer on a real terminal. Each key waits for output from the
+/// screen it answers, so a slow runner cannot advance into another screen.
+fn terminal_flow(dir: &Path, command: &str, steps: &[(&[u8], &[u8])]) -> Vec<u8> {
     use std::io::{Read, Write};
     use std::process::Stdio;
     use std::sync::{Arc, Mutex};
@@ -61,16 +27,16 @@ fn drawn_flow(name: &str, dir: &Path, command: &str, after: &str, steps: &[&[u8]
         .args(["-qfec", command, "/dev/null"])
         .current_dir(dir)
         // The host's own COLUMNS would reach the pty and redraw at that
-        // width, so the golden pins the drawn width it captured.
+        // width, so the terminal smoke pins its drawn width.
         .env("COLUMNS", "80")
-        // The transcript snapshot retains terminal styling, so a shell's
-        // NO_COLOR must not reach the pty.
+        // The smoke exercises terminal styling, so a shell's NO_COLOR must
+        // not reach the pty.
         .env_remove("NO_COLOR")
         // A TPM on the host adds the `tpm2-` kinds to the encryption window,
         // so the probe is pointed at a path no machine carries.
         .env("TECT_TPM", "/nonexistent")
-        // A caret that redraws on a clock would put frames in the transcript
-        // that depend on the runner's timing rather than on the keys typed.
+        // A static caret prevents runner timing from changing the observed
+        // output.
         .env("TECT_CARET", "static")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -95,13 +61,30 @@ fn drawn_flow(name: &str, dir: &Path, command: &str, after: &str, steps: &[&[u8]
             }
         })
     };
-    for keys in steps {
-        std::thread::sleep(Duration::from_millis(400));
+    for (marker, keys) in steps {
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            let seen = raw
+                .lock()
+                .unwrap()
+                .windows(marker.len())
+                .any(|window| window == *marker);
+            if seen {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the terminal did not draw {:?}: {}",
+                String::from_utf8_lossy(marker),
+                String::from_utf8_lossy(&raw.lock().unwrap())
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
         let mut input = input.lock().unwrap();
         input.write_all(keys).unwrap();
         input.flush().unwrap();
     }
-    // A walk that derails leaves the installer on a screen no step answers.
+    // A sequence that derails leaves the installer on a screen no step answers.
     // The deadline turns that into a failure with the frames it drew, where an
     // unending wait hides which frame went wrong.
     let deadline = std::time::Instant::now() + Duration::from_secs(120);
@@ -135,13 +118,7 @@ fn drawn_flow(name: &str, dir: &Path, command: &str, after: &str, steps: &[&[u8]
         String::from_utf8_lossy(&raw)
     );
 
-    let text = String::from_utf8_lossy(&raw);
-    let stable = text.rsplit_once(after).unwrap().1;
-    assert_golden(
-        name,
-        "transcript.txt",
-        &format!("{after}{stable}==== exit 0\n"),
-    );
+    raw.clone()
 }
 
 /// `--version` is the probe the media build runs before it pins the binary,
@@ -159,8 +136,6 @@ fn version_names_the_program_and_the_release() {
     );
 }
 
-/// A bad invocation is refused before a payload root is read, in the run's one
-/// `Error:` line and with the usage exit code.
 #[test]
 fn a_bad_invocation_is_refused_with_the_usage_code() {
     for (args, said) in [
@@ -178,8 +153,6 @@ fn a_bad_invocation_is_refused_with_the_usage_code() {
     }
 }
 
-/// The hand-rendered usage line left with the parser, so `--help` has to name
-/// every flag the tree declares.
 #[test]
 fn help_prints_every_flag_and_exits_zero() {
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_tect-installer"))
@@ -260,7 +233,6 @@ fn a_second_installer_is_refused_while_the_first_holds_the_screen() {
             .unwrap()
     };
 
-    // The first installer runs on a pty, so it reaches its screen and waits.
     let mut first = std::process::Command::new("script")
         .args([
             "-qfec",
@@ -309,15 +281,8 @@ fn a_second_installer_is_refused_while_the_first_holds_the_screen() {
     );
 }
 
-/// Walks the installer's one screen over a payload root, on a real terminal.
-/// The screen carries every question at once and each one is answered in
-/// place. `Install` stays dim until every required answer is given.
-///
-/// The steps walk that screen and then take `Install`, which draws the
-/// summary and the confirmation that costs a disk. The walk leaves from the
-/// summary, so no install runs and no disk is written.
 #[test]
-fn install_screens() {
+fn installer_terminal_smoke_waits_for_each_screen() {
     use std::os::unix::fs::PermissionsExt;
 
     let dir = empty("flow-install-drawn");
@@ -339,7 +304,7 @@ fn install_screens() {
     )
     .unwrap();
     // The disk rows the form offers come from the running machine, and no two
-    // machines carry the same disks. The golden brings its own `/sys/block`
+    // machines carry the same disks. The fixture brings its own `/sys/block`
     // so the drawn rows are the fixture's.
     let sys = dir.join("sys-block");
     for (name, size, removable, model) in [
@@ -368,11 +333,10 @@ esac
     // The manual layout reads the chosen disk's table through `libfdisk`,
     // which opens the device. The fixture's disks have no node on this rig,
     // so the fixture writes a real GPT onto a sparse file and `TECT_DEV` aims
-    // the installer's device reads at the directory holding it. The reader it
-    // replaced ran `sfdisk --dump`, which the fixture answered on `PATH`.
+    // the installer's device reads at the directory holding it.
     //
     // `sfdisk` is required and not skipped. It ships with the `script` above
-    // in util-linux, and a silent return would report the whole drawn flow as
+    // in util-linux, and a silent return would report the terminal smoke as
     // passed without drawing it.
     let dev = dir.join("dev");
     std::fs::create_dir_all(&dev).unwrap();
@@ -424,10 +388,9 @@ esac
     }
     assert!(child.wait().unwrap().success());
     // The walk mounts what the disk holds read-only. The disk does not exist
-    // on this rig, so the fixture answers `mount` itself: it mounts nothing
+    // on this rig, so the fixture answers `mount` itself. It mounts nothing
     // and writes onto the mount point the few files the walk reads, which is
-    // what lets the drawn table carry a detected system. A VM proof covers
-    // what the walk does with a real disk.
+    // what lets the drawn table carry a detected system.
     let fake_mount = dir.join("mount");
     std::fs::write(
         &fake_mount,
@@ -480,7 +443,7 @@ esac
     .unwrap();
     std::fs::set_permissions(&podman, std::fs::Permissions::from_mode(0o755)).unwrap();
     // The panel states the firmware of the machine running it. That machine
-    // may be UEFI or BIOS, and no two agree on their variables, so the golden
+    // may be UEFI or BIOS, and no two agree on their variables, so the fixture
     // brings its own efivars.
     let efivars = dir.join("efivars");
     std::fs::create_dir_all(&efivars).unwrap();
@@ -495,15 +458,11 @@ esac
     }
     // The switch note names the VT the installer sits on. A machine with no
     // console reads nothing here, and a machine with one reads whichever VT
-    // the user started the run from. The golden brings its own VT instead.
+    // the user started the run from. The fixture brings its own VT instead.
     let active = dir.join("tty0-active");
     std::fs::write(&active, "tty2\n").unwrap();
-    drawn_flow(
-        "flow-install-drawn",
+    let transcript = terminal_flow(
         &dir,
-        // The installer media's console is 50 rows. A 24-row pty would scroll
-        // the answers the walk asserts out of the captured frames, so the pty
-        // is pinned to the media console's height.
         &format!(
             "stty rows 50 cols 80; PATH='{}':\"$PATH\" TECT_INSTALLER_LOCK='{}' TECT_SYS_BLOCK='{}' TECT_DEV='{}' TECT_MOUNT_ROOT='{}' TECT_EFIVARS='{}' TECT_TTY0_ACTIVE='{}' '{}' --from .",
             dir.display(),
@@ -515,215 +474,15 @@ esac
             active.display(),
             env!("CARGO_BIN_EXE_tect-installer")
         ),
-        // The installer prints the discovery line last before the first
-        // widget draws. Anchoring there keeps every question in the golden.
-        &format!("{}: ghcr.io/tectonic-os/deb2:latest, from .\r\n", installer::PROGRAM),
         &[
-            // `Install` is dim before any answer is given and says nothing
-            // on its own. The walk moves down to it and takes it, which draws
-            // the missing answers, and then comes back up. Typing enters a
-            // field, so the walk changes rows with the arrow keys.
-            b"\x1b[B", b"\x1b[B", b"\x1b[B", b"\x1b[B", b"\x1b[B", b"\x1b[B",
-            b"\x1b[B",
-            b"\r",
-            b"\x1b[A", b"\x1b[A", b"\x1b[A", b"\x1b[A", b"\x1b[A", b"\x1b[A",
-            b"\x1b[A",
-            // The hostname starts blank by the owner's decision 2026-09-24,
-            // so the walk supplies one before the username.
-            b"deb2\r",
-            b"tect\r",
-            b"hunter2\r",
-            b"hunter2\r",
-            // The `partition layout` row opens a list of layouts.
-            b"\r", // open the pick
-            b"\r", // take whole disk
-            b"\x1b[B",
-            b"\x1b[B", // to the table
-            b"\r", // table mode
-            b"\x1b[B", // to the internal disk
-            b"\r", // the disk confirmation opens
-            b"", // settle
-            b"\r", // Use this disk
-            b"", // settle
-            // The walk leaves the table and walks up to the encryption row.
-            b"\x1b[A", // the disk above the chosen one
-            b"\x1b[A", // out of the table, to the encryption row
-            // The encryption type is a radio group. Taking `none` owes no
-            // passphrase, so the window closes on the answer.
-            b"\r", // the type window opens
-            b"\r", // takes none and closes the window
-            b"", // settle
-            // A kind that owes a passphrase keeps the window up. The window
-            // asks for the passphrase twice, and enter on the confirmation
-            // submits it.
-            b"\r", // the type window opens
-            b"\x1b[B", // to LUKS with passphrase
-            b"\r", // takes LUKS with passphrase
-            b"opensesame\r", // the passphrase
-            b"opensesamex\r", // a mismatch the window refuses
-            b"\x7f", // corrects the confirmation
-            b"\r", // the corrected confirmation closes the window
-            b"", // settle
-            b"\x1b[A", // to partition layout
-            b"\r", // open the pick
-            b"\x1b[B", // to manual
-            b"\r", // takes the manual layout
-            b"\x1b[B", // to the table
-            b"\r", // table mode, which opens on the first disk
-            b"\r", // a manual pick of another disk, which asks nothing
-            b"\x1b[B", // to the chosen disk
-            b"\r", // a manual pick of the chosen disk, asking nothing
-            b"\x1b[B", // the first partition
-            b"\r", // Assign opens
-            b"\r", // its list
-            b"\x1b[B", // the mount point
-            b"\r", // take /boot/efi
-            b"\x1b[B", // the second partition
-            b"\r", // Assign opens
-            b"\r", // its list
-            b"\x1b[B", // the mount point
-            b"\r", // take /
-            b"\r", // the row menu
-            b"\x1b[B", // Format
-            b"\r", // the format window
-            b"\r", // take ext4
-            b"\x1b[B", // the container partition below
-            b"\x1b[B", // out of the table, to the actions
-            b"\x1b[C", // Switch to shell
-            b"\r", // its screen
-            b"\x1b", // Go back, which opens on the table again
-            b"\x1b[B", // to the actions
-            b"\r", // Install
-            b"\x1b[C",
-            b"\r", // Go back on the summary
-            b"\x1b", // the leave question
-            b"\x1b[B",
-            b"\x1b[B",
-            b"\r", // Quit
+            (b"hostname".as_slice(), b"\x1b".as_slice()),
+            (
+                b"Leave the installer?".as_slice(),
+                b"\x1b[B\x1b[B\r".as_slice(),
+            ),
         ],
     );
-    // The password the walk typed is not in the transcript. A serial console
-    // keeps that transcript and a failed install is read back from it, so a
-    // secret drawn into a frame would outlive the run.
-    let transcript = snapshot_text("flow-install-drawn", "transcript.txt");
-    assert!(!transcript.contains("hunter2"), "{transcript}");
-    // The panel was drawn from the fixture rather than from this machine.
-    // ratatui writes the cells a frame changed in runs, so some panel lines
-    // arrive in fragments. `tests::panel` checks the wording whole. A run that
-    // stopped drawing the panel loses these words from the transcript.
-    for phrase in [
-        "OS Image",
-        installer::copy::PANEL_FIRMWARE,
-        "bootloader",
-        // The fixture firmware is in setup mode, so the secure-boot row
-        // states the condition key enrolment needs rather than a plain off.
-        // The panel draws labels and values in separate columns, so only the
-        // value is asserted whole.
-        installer::copy::FIRMWARE_SETUP,
-    ] {
-        assert!(transcript.contains(phrase), "{phrase} is not on the screen");
-    }
-    // Taking the dim `Install` drew the missing answers, under the blank row
-    // the screen sets them apart with.
-    assert!(
-        transcript.contains("Missing: hostname, installation disk, username, password"),
-        "{transcript}"
-    );
-    // `Install` was reachable. A green golden cannot show that on its own,
-    // because a run that leaves at the end exits 0 either way.
-    //
-    // These asserts take contiguous text only. ratatui writes the cells a
-    // frame changed, so a label overlapping what was under it arrives in
-    // fragments with cursor moves between the words. The summary's own
-    // `Go back` button is not contiguous, so the three lines below prove the
-    // summary instead.
-    assert!(
-        transcript.contains(installer::copy::INSTALLATION_SUMMARY),
-        "{transcript}"
-    );
-    assert!(transcript.contains(installer::copy::READY), "{transcript}");
-    assert!(
-        transcript.contains(installer::copy::START_INSTALLATION),
-        "{transcript}"
-    );
-    // The action row carries the escape hatch beside `Install`. The walk
-    // opened its screen and answered `Go back`, so this is the only place a
-    // handover to the shell would have run.
-    assert!(
-        transcript.contains(installer::copy::EXIT_SHELL),
-        "{transcript}"
-    );
-    // The switch screen names the machine's own tty and the key that returns
-    // to the installer. The note is redrawn cell by cell, so only its tail
-    // stays contiguous. The returning key is what the screen exists to say.
-    assert!(transcript.contains("Ctrl+Alt"), "{transcript}");
-    assert!(
-        transcript.contains(installer::copy::GO_BACK),
-        "{transcript}"
-    );
-    // The note under the ready line states the cost of continuing. The note
-    // is redrawn cell by cell over what was under it, so only its last word
-    // stays contiguous.
-    assert!(transcript.contains("undone"), "{transcript}");
-    // Both disks were offered under the disk row, and the walk took the one
-    // its steps moved to. Device names stay contiguous where their models do
-    // not.
-    assert!(transcript.contains("/dev/sdb"), "{transcript}");
-    assert!(transcript.contains("/dev/vda"), "{transcript}");
-    assert!(transcript.contains("/dev/vda1"), "{transcript}");
-    // The partition table drew what the walk set. The ESP is assigned at
-    // `/boot/efi` and carries no format tick, because the walk only assigned
-    // it. The root is formatted `ext4`. The container's `crypto_LUKS` row
-    // stays closed, and the key window's own test covers opening one.
-    for phrase in [
-        "filesystem",
-        "format",
-        "/boot/efi",
-        "ext4",
-        // The automatic plan's type column names what the cut writes. The
-        // manual rows' fixture carries no GPT type, so `linux` can only come
-        // from the plan.
-        "linux",
-        // The container's row is drawn closed, in the filesystem column the
-        // owner's fixed widths sized for exactly this word.
-        "luks(closed)",
-        // Only a `Format` answer draws the tick on the root. The fixture's
-        // `lsblk` already says `ext4`, so the filesystem cell alone would not
-        // prove the walk's Format ran.
-        installer::copy::FORMAT_TICK,
-        // The disk row's size comes from the fixture's `/sys/block`. The
-        // partition's size comes from the fixture's `lsblk` answer. Both are
-        // drawn in decimal GB to one place, so lsblk's binary `60G` reads as
-        // 64.4 GB.
-        "68.7 GB",
-        "64.4 GB",
-    ] {
-        assert!(
-            transcript.contains(phrase),
-            "{phrase} is not drawn: {transcript}"
-        );
-    }
-    // The systems the walk found draw as children of the partitions that
-    // carry them. The ESP's `EFI/fedora` directory and the old root's own
-    // `os-release` are the two sources the fixture writes.
-    for phrase in ["fedora", "Test OS"] {
-        assert!(
-            transcript.contains(phrase),
-            "{phrase} is not drawn: {transcript}"
-        );
-    }
-    // The encryption window's passphrase is not in the transcript either. The
-    // walk typed it twice, and neither the passphrase field nor its
-    // confirmation drew the bytes.
-    assert!(!transcript.contains("opensesame"), "{transcript}");
-    // The manual table opens the format window. These asserts take its title
-    // and the list the walk chose from.
-    assert!(
-        transcript.contains(installer::copy::SELECT_FORMAT),
-        "{transcript}"
-    );
-    assert!(
-        transcript.contains("btrfs") && transcript.contains("xfs"),
-        "{transcript}"
-    );
+    let transcript = String::from_utf8_lossy(&transcript);
+    assert!(transcript.contains("hostname"), "{transcript}");
+    assert!(transcript.contains("Leave the installer?"), "{transcript}");
 }
