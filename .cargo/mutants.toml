@@ -1,0 +1,10 @@
+# The suite runs under nextest, the runner this repository's check ends in.
+test_tool = "nextest"
+
+# The default mutants.out/ would sit untracked in the tree, so results land in
+# the ignored target directory.
+output = "target"
+
+# A mutant whose test run exceeds five times the baseline suite time is
+# killed, with a twenty-second floor.
+timeout_multiplier = 5.0
