@@ -48,7 +48,7 @@ Buffer {
         "│                                                                              │",
         "│                                                                              │",
         "│                                                                              │",
-        "╰─ left and right to move, enter to answer ────────────────────────────────────╯",
+        "╰─ ←/→ select • ⏎  confirm • Esc back ─────────────────────────────────────────╯",
         "                                                                                ",
         "                                                                                ",
         "                                                                                ",
@@ -157,7 +157,7 @@ Buffer {
         x: 1, y: 43, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
         x: 79, y: 43, fg: Rgb(90, 86, 224), bg: Reset, underline: Reset, modifier: NONE,
         x: 3, y: 44, fg: DarkGray, bg: Reset, underline: Reset, modifier: NONE,
-        x: 42, y: 44, fg: Rgb(90, 86, 224), bg: Reset, underline: Reset, modifier: NONE,
+        x: 37, y: 44, fg: Rgb(90, 86, 224), bg: Reset, underline: Reset, modifier: NONE,
         x: 0, y: 45, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
     ]
 }
