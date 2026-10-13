@@ -34,6 +34,26 @@ fn a_recipe_field_the_installer_does_not_implement_is_refused_by_name() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+#[test]
+fn a_duplicate_recipe_field_is_refused_by_the_recipe_consumer() {
+    let root = scratch("duplicate-recipe-field");
+    let path = root.join(RECIPE);
+    let raw = EMITTED.replace(
+        "\"bootloader\": \"grub2\",",
+        "\"bootloader\": \"grub2\",\n  \"bootloader\": \"systemd\",",
+    );
+    assert_ne!(raw, EMITTED);
+    std::fs::write(&path, raw).expect("a recipe");
+    let refused = InstallRecipe::read(&path)
+        .err()
+        .expect("a duplicate recipe field is refused");
+    assert!(
+        refused.contains("field `bootloader` occurs twice"),
+        "{refused}"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
 /// A default bootloader would cut a GRUB `/boot` for a systemd-boot image
 /// before the installer noticed the image had no GRUB.
 #[test]
