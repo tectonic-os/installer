@@ -11,6 +11,8 @@
 pub mod cli;
 pub mod copy;
 pub mod firmware;
+#[cfg(feature = "fuzzing")]
+pub mod fuzzing;
 
 pub(crate) use common::json::{self, Json};
 pub(crate) use common::prompt::Prompt;

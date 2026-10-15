@@ -1,0 +1,76 @@
+[package]
+name = "installer-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+license = "Apache-2.0"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.installer]
+path = ".."
+features = ["fuzzing"]
+
+# Use independent workspace for fuzzers
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "recipe"
+path = "fuzz_targets/recipe.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "discovery"
+path = "fuzz_targets/discovery.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "disk_headers"
+path = "fuzz_targets/disk_headers.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "automatic_partitions"
+path = "fuzz_targets/automatic_partitions.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "boot_entries"
+path = "fuzz_targets/boot_entries.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "payload_labels"
+path = "fuzz_targets/payload_labels.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "system_config"
+path = "fuzz_targets/system_config.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "accounts"
+path = "fuzz_targets/accounts.rs"
+test = false
+doc = false
+bench = false

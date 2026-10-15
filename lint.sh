@@ -10,7 +10,8 @@ fi
 
 # Every .rs in the crate, so a `build.rs` added at the root later is covered
 # without editing this, the way `tect`'s own lint covers a new workspace member.
-mapfile -t crate_src < <(find . -path ./target -prune -o -name '*.rs' -type f -print)
+mapfile -t crate_src < <(find . \( -path ./target -o -path ./fuzz/target \) -prune -o \
+    -name '*.rs' -type f -print)
 
 # This check covers every source form that the dependency graph cannot see: an
 # import, a renaming import, an `extern crate`, or a path written at the call
@@ -44,6 +45,11 @@ echo "lint: the source is clean"
 
 cargo deny --locked check bans licenses sources
 echo "lint: the dependency policy accepts the locked graph"
+
+# Only the scheduled fuzz job builds the fuzz targets, so this check keeps
+# their entry points compiling on every push.
+cargo check --locked --features fuzzing
+echo "lint: the fuzz entry points compile"
 
 cargo nextest run --locked
 echo "lint: the installer does what it did"

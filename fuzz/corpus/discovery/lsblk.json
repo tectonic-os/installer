@@ -1,0 +1,1 @@
+{"blockdevices":[{"name":"/dev/fuzz1","size":"1G","fstype":"ext4","type":"part","uuid":"abc"}]}

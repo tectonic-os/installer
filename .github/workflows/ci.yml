@@ -27,6 +27,12 @@ jobs:
         with:
           arguments: --locked
 
+      - name: Check fuzz dependencies
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          manifest-path: fuzz/Cargo.toml
+          arguments: --locked
+
   lint:
     runs-on: ubuntu-24.04
     steps:
@@ -65,3 +71,29 @@ jobs:
           msrv="$(cargo metadata --no-deps --format-version 1 | jq -er '.packages[0].rust_version')"
           rustup toolchain install "$msrv" --profile minimal
           cargo "+${msrv}" nextest run --locked --profile ci
+
+  fuzz:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install fuzzing tools
+        run: |
+          rustup toolchain install nightly-2026-10-14 --profile minimal
+          cargo +nightly-2026-10-14 install --locked cargo-fuzz --version 0.13.2
+
+      - name: Fuzz every target
+        run: ./fuzz/run.sh 60
+
+      - name: Preserve fuzz failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: installer-fuzz-failure
+          path: |
+            fuzz/artifacts
+            fuzz/target/*.log
+          if-no-files-found: ignore

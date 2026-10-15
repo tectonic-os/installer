@@ -119,13 +119,22 @@ fn image_gb(image: &str) -> Option<u64> {
         .output()
         .ok()?;
     match out.status.success() {
-        true => String::from_utf8_lossy(&out.stdout)
-            .trim()
-            .parse::<u64>()
-            .ok()
-            .map(|bytes| bytes.div_ceil(1_000_000_000)),
+        true => image_size(&String::from_utf8_lossy(&out.stdout)),
         false => None,
     }
+}
+
+fn image_size(raw: &str) -> Option<u64> {
+    raw.trim()
+        .parse::<u64>()
+        .ok()
+        .map(|bytes| bytes.div_ceil(1_000_000_000))
+}
+
+#[cfg(feature = "fuzzing")]
+pub fn fuzz_readers(text: &str) {
+    let _ = labelled(text);
+    let _ = image_size(text);
 }
 
 /// Names which of the three cases a root is.
