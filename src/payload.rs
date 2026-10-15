@@ -139,6 +139,10 @@ pub fn fuzz_readers(text: &str) {
 
 /// Names which of the three cases a root is.
 #[derive(Debug)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "classify builds one value per run, so the large variant's size is paid once"
+)]
 pub enum Found {
     /// Carries built bytes and the recipe for them. This installs, and needs
     /// no network.

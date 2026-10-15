@@ -27,9 +27,7 @@ fn a_recipe_field_the_installer_does_not_implement_is_refused_by_name() {
         "\"user\": { \"groups\": [\"sudo\"] },\n  \"varDisk\": { \"disk\": \"/dev/sdb\" },",
     );
     std::fs::write(&path, raw).expect("a recipe");
-    let refused = InstallRecipe::read(&path)
-        .err()
-        .expect("varDisk is not an installer field");
+    let refused = InstallRecipe::read(&path).expect_err("varDisk is not an installer field");
     assert!(refused.contains("`varDisk`") && refused.contains("not implemented"));
     let _ = std::fs::remove_dir_all(root);
 }
@@ -44,9 +42,7 @@ fn a_duplicate_recipe_field_is_refused_by_the_recipe_consumer() {
     );
     assert_ne!(raw, EMITTED);
     std::fs::write(&path, raw).expect("a recipe");
-    let refused = InstallRecipe::read(&path)
-        .err()
-        .expect("a duplicate recipe field is refused");
+    let refused = InstallRecipe::read(&path).expect_err("a duplicate recipe field is refused");
     assert!(
         refused.contains("field `bootloader` occurs twice"),
         "{refused}"
@@ -66,9 +62,7 @@ fn a_recipe_without_a_bootloader_is_refused_by_name() {
         .collect::<Vec<_>>()
         .join("\n");
     std::fs::write(&path, raw).expect("a recipe");
-    let refused = InstallRecipe::read(&path)
-        .err()
-        .expect("a recipe without a bootloader is refused");
+    let refused = InstallRecipe::read(&path).expect_err("a recipe without a bootloader is refused");
     assert!(refused.contains("`bootloader`"), "{refused}");
     let _ = std::fs::remove_dir_all(root);
 }
@@ -82,9 +76,7 @@ fn a_sealed_recipe_on_a_filesystem_without_verity_is_refused() {
     let raw = EMITTED.replace("\"filesystem\": \"ext4\"", "\"filesystem\": \"xfs\"");
     assert_ne!(raw, EMITTED);
     std::fs::write(&path, raw).expect("a recipe");
-    let refused = InstallRecipe::read(&path)
-        .err()
-        .expect("a sealed recipe on xfs is refused");
+    let refused = InstallRecipe::read(&path).expect_err("a sealed recipe on xfs is refused");
     assert!(refused.contains("`composeFsBackend`"), "{refused}");
     let _ = std::fs::remove_dir_all(root);
 }
