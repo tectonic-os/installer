@@ -1,0 +1,1 @@
+{"image":"example.invalid/fuzz:1","targetImgref":"example.invalid/fuzz:1","bootloader":"grub2","filesystem":"ext4","hostname":"fuzz","groups":["wheel"],"stores":[]}

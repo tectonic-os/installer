@@ -1,0 +1,2 @@
+SELINUXTYPE=targeted
+UUID=fuzz / ext4 defaults 0 1

@@ -8,6 +8,9 @@ rust-version = "1.88"
 publish = false
 description = "Installs a bootc image onto a disk from the media that carries it"
 
+[features]
+fuzzing = ["dep:tempfile"]
+
 [[bin]]
 name = "tect-installer"
 path = "src/main.rs"
@@ -15,6 +18,7 @@ path = "src/main.rs"
 [dependencies]
 clap = { version = "4.6.7", features = ["derive"] }
 libc = "0.2"
+tempfile = { version = "3.27.0", optional = true }
 # Pinned by rev, never by version. A change in `common` is a commit there and
 # a bump here, which keeps the rev that was built with visible in `Cargo.lock`.
 common = { git = "https://github.com/tectonic-os/common", rev = "8ad7beb36fe5228b1ed17555faa113a78ca865c8" }
