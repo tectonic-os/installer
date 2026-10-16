@@ -540,7 +540,6 @@ impl DiskLock {
         use std::os::fd::AsRawFd as _;
 
         let file = std::fs::File::open(disk).map_err(|err| format!("{disk}: {err}"))?;
-        // SAFETY: `file` keeps the descriptor open for the call.
         let locked = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
         if locked == 0 {
             Ok(Self(file))
@@ -556,7 +555,6 @@ impl Drop for DiskLock {
     fn drop(&mut self) {
         use std::os::fd::AsRawFd as _;
 
-        // SAFETY: `self.0` keeps the descriptor open until `Drop` ends.
         unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
     }
 }
@@ -728,8 +726,8 @@ pub(crate) fn apply_cuts(layout: &CustomLayout) -> Result<Vec<usize>, String> {
     // cannot hold refuses while the table is whole. `layout_short_of` refused
     // the same plan on the form's own table; a different answer here means the
     // disk moved while the plan was reviewed.
-    let (starts, _) =
-        place_creates(&table, &layout.deletes, &layout.creates).map_err(copy::custom_too_big)?;
+    let (starts, _) = place_creates(&table, &layout.deletes, &layout.creates)
+        .map_err(|room| copy::custom_too_big(room))?;
     match cleared {
         true => sfdisk_script(&layout.disk, &[], "label: gpt\n")?,
         false => {

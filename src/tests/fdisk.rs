@@ -227,7 +227,6 @@ impl Drop for Loop {
 /// running, which is the false green the `#[ignore]` reason exists to avoid.
 fn loop_4kn(name: &str, bytes: u64) -> (Loop, String) {
     assert_eq!(
-        // SAFETY: geteuid takes no argument and always succeeds.
         unsafe { libc::geteuid() },
         0,
         "{name} needs root: a 4Kn loop device cannot be attached as a user"

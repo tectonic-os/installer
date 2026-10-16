@@ -157,7 +157,7 @@ impl Answers {
                     )
                 },
                 |fields| pair_mismatch(fields, [ROW_PASSWORD, ROW_CONFIRM]),
-                asked,
+                |fields| asked(fields),
                 copy::INSTALL_KEYS,
                 &panel,
                 &[
