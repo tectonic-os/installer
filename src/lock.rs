@@ -101,8 +101,6 @@ pub(crate) fn hold_at(path: &Path) -> Result<std::fs::File, String> {
     // Two passes, because `F_GETLK` answers `F_UNLCK` when the holder exited
     // between the two calls. The second pass takes the lock the holder freed.
     for _ in 0..2 {
-        // SAFETY: `file` keeps the descriptor open, and the `flock` value
-        // outlives the call.
         if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETLK, &wrlck()) } != -1 {
             return Ok(file);
         }
@@ -115,8 +113,6 @@ pub(crate) fn hold_at(path: &Path) -> Result<std::fs::File, String> {
             ));
         }
         let mut holder = wrlck();
-        // SAFETY: `file` keeps the descriptor open, and `F_GETLK` writes one
-        // `flock` into `holder`.
         if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETLK, &mut holder) } == -1 {
             break;
         }

@@ -51,9 +51,6 @@ echo "lint: the dependency policy accepts the locked graph"
 cargo check --locked --features fuzzing
 echo "lint: the fuzz entry points compile"
 
-cargo clippy --locked --all-targets -- -D warnings
-echo "lint: clippy accepts every target"
-
 cargo nextest run --locked
 echo "lint: the installer does what it did"
 

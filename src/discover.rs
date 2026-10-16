@@ -701,9 +701,6 @@ pub(crate) fn test_key(container: &str, key: &[u8]) -> Result<bool, String> {
     Ok(status.success())
 }
 
-/// Answers whether a key opens a LUKS partition.
-type Opens = dyn Fn(&Partition, &[u8]) -> Result<bool, String>;
-
 /// Proves each key the old systems hold against the editor's container it
 /// opens. `opens` does the proving, so an install passes `cryptsetup` and a
 /// test passes a closure.
@@ -712,7 +709,7 @@ pub(crate) fn discover(
     systems: &[OldSystem],
     unread: &[String],
     mounts: &mut Mounts,
-    opens: &Opens,
+    opens: &dyn Fn(&Partition, &[u8]) -> Result<bool, String>,
 ) -> Discovered {
     let mut found = Discovered::default();
     for partition in partitions
