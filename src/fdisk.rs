@@ -79,6 +79,8 @@ impl Context {
     /// `-EINVAL` and the call changes nothing today.
     fn read_only(disk: &str) -> Result<Self, String> {
         let path = CString::new(disk).map_err(|_| format!("{disk}: the path holds a NUL byte"))?;
+        // SAFETY: `fdisk_new_context` takes no argument, and the null check
+        // below covers a failed allocation.
         let cxt = unsafe { fdisk_new_context() };
         if cxt.is_null() {
             return Err(format!("libfdisk: no context for {disk}"));
@@ -87,10 +89,14 @@ impl Context {
             cxt,
             assigned: false,
         };
+        // SAFETY: `context.cxt` is the non-null context that
+        // `fdisk_new_context` returned.
         unsafe { fdisk_disable_dialogs(context.cxt, 1) };
         // libfdisk returns a negative errno. An unpartitioned disk assigns
         // without error and reports no label, so a failure here names a device
         // the installer cannot read at all.
+        // SAFETY: the context is live, and libfdisk copies `path` with `strdup`
+        // before the call returns.
         let rc = unsafe { fdisk_assign_device(context.cxt, path.as_ptr(), 1) };
         if rc < 0 {
             return Err(format!("libfdisk: cannot read {disk} ({rc})"));
@@ -103,17 +109,24 @@ impl Context {
     /// disk carries no label and answers with an empty string, which is what
     /// `wrong_label_for` reads when it refuses a create or a planned name.
     fn label(&self) -> String {
+        // SAFETY: `self.cxt` is the live context that `Context` holds until
+        // `Drop`.
         if unsafe { fdisk_has_label(self.cxt) } == 0 {
             return String::new();
         }
+        // SAFETY: `self.cxt` is live, and a null name asks for the current
+        // label, which the context owns.
         let label = unsafe { fdisk_get_label(self.cxt, std::ptr::null()) };
         if label.is_null() {
             return String::new();
         }
+        // SAFETY: `label` is non-null, and the live context owns it.
         let name = unsafe { fdisk_label_get_name(label) };
         if name.is_null() {
             return String::new();
         }
+        // SAFETY: `name` is non-null, and the label holds that NUL-terminated
+        // name as long as the context lives.
         unsafe { CStr::from_ptr(name) }
             .to_string_lossy()
             .into_owned()
@@ -124,11 +137,16 @@ impl Context {
     /// editor screen shows slots as the disk holds them.
     fn slots(&self, disk: &str) -> Vec<Slot> {
         let mut table: *mut c_void = std::ptr::null_mut();
+        // SAFETY: `self.cxt` is live, and a null `table` makes libfdisk
+        // allocate one that this function releases.
         if unsafe { fdisk_get_partitions(self.cxt, &mut table) } < 0 || table.is_null() {
             return Vec::new();
         }
         let mut slots = Vec::new();
+        // SAFETY: `table` is the non-null table that `fdisk_get_partitions`
+        // allocated.
         for index in 0..unsafe { fdisk_table_get_nents(table) } {
+            // SAFETY: `table` is live, and `index` is below its entry count.
             let part = unsafe { fdisk_table_get_partition(table, index) };
             if part.is_null() {
                 continue;
@@ -143,22 +161,30 @@ impl Context {
             // libfdisk left unset. Upstream requires `fdisk_partition_has_partno`
             // before the number is read, and the unset value is `(size_t)-1`,
             // which `number + 1` would wrap to 0 and name `/dev/sda0`.
+            // SAFETY: `part` is non-null, and `table` keeps it alive until
+            // `fdisk_unref_table`.
             if unsafe { fdisk_partition_has_start(part) } == 0
+                // SAFETY: `table` still holds `part`.
                 || unsafe { fdisk_partition_has_size(part) } == 0
+                // SAFETY: `table` still holds `part`.
                 || unsafe { fdisk_partition_has_partno(part) } == 0
             {
                 continue;
             }
+            // SAFETY: `table` still holds `part`.
             let number = unsafe { fdisk_partition_get_partno(part) };
             slots.push(Slot {
                 // `fdisk_partition_get_partno` counts from zero and every
                 // device node counts from one.
                 node: partname(disk, number + 1),
                 number: number + 1,
+                // SAFETY: `table` still holds `part`.
                 start: unsafe { fdisk_partition_get_start(part) },
+                // SAFETY: `table` still holds `part`.
                 sectors: unsafe { fdisk_partition_get_size(part) },
             });
         }
+        // SAFETY: `table` is live, and no `part` pointer outlives this call.
         unsafe { fdisk_unref_table(table) };
         slots
     }
@@ -172,8 +198,12 @@ impl Drop for Context {
             // The argument is passed as 1 to state the intent for the day a
             // writer opens a context read-write, where the other branch calls
             // `sync(2)` across the whole system.
+            // SAFETY: `assigned` is true only after `fdisk_assign_device`
+            // succeeded on this live context.
             unsafe { fdisk_deassign_device(self.cxt, 1) };
         }
+        // SAFETY: `self.cxt` is the non-null context that `read_only` created,
+        // and nothing uses it after `Drop`.
         unsafe { fdisk_unref_context(self.cxt) };
     }
 }
@@ -206,15 +236,18 @@ pub(crate) fn partname(disk: &str, number: usize) -> String {
     let Ok(path) = CString::new(disk) else {
         return String::new();
     };
+    // SAFETY: `path` is a NUL-terminated string that outlives the call.
     let name = unsafe { fdisk_partname(path.as_ptr(), number) };
     if name.is_null() {
         return String::new();
     }
+    // SAFETY: `name` is non-null, and `fdisk_partname` wrote a NUL-terminated
+    // string into it.
     let node = unsafe { CStr::from_ptr(name) }
         .to_string_lossy()
         .into_owned();
-    // `fdisk_partname` returns storage from `malloc`, and libfdisk offers no
-    // free of its own for it.
+    // SAFETY: `fdisk_partname` returns storage from `malloc`, and libfdisk
+    // offers no free of its own for it. Nothing reads `name` after this call.
     unsafe { libc::free(name.cast()) };
     node
 }
@@ -232,6 +265,7 @@ pub(crate) fn read_table(disk: &str) -> Result<DiskTable, String> {
     // distance on a 4Kn disk than on a 512-byte one.
     const ALIGN: u64 = 1024 * 1024;
     let context = Context::read_only(disk)?;
+    // SAFETY: `context` holds a live context with the disk assigned.
     let sector = unsafe { fdisk_get_sector_size(context.cxt) } as u64;
     let mut table = DiskTable {
         // `fdisk_discover_topology` sets the sector size on every successful
@@ -244,7 +278,9 @@ pub(crate) fn read_table(disk: &str) -> Result<DiskTable, String> {
             size => size,
         },
         label: context.label(),
+        // SAFETY: `context` holds a live context with the disk assigned.
         first: unsafe { fdisk_get_first_lba(context.cxt) },
+        // SAFETY: `context` holds a live context with the disk assigned.
         last: unsafe { fdisk_get_last_lba(context.cxt) },
         slots: context.slots(disk),
     };
@@ -267,6 +303,7 @@ pub(crate) fn read_table(disk: &str) -> Result<DiskTable, String> {
     // which is the case that found it.
     if table.label != "gpt" {
         table.first = ALIGN / table.sector;
+        // SAFETY: `context` holds a live context with the disk assigned.
         table.last = unsafe { fdisk_get_nsectors(context.cxt) }.saturating_sub(34);
     }
     Ok(table)

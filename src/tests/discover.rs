@@ -284,6 +284,7 @@ fn a_key_path_cannot_leave_the_system_that_names_it() {
     std::os::unix::fs::symlink("/etc/hostname", root.join("etc/escape.key")).expect("a link");
     let fifo = root.join("etc/slow.key");
     let path = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+    // SAFETY: `path` is a NUL-terminated string that outlives the call.
     assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
     assert!(key_file("var", &root, Path::new("/etc/real.key")).is_ok());
     assert_eq!(
@@ -361,6 +362,7 @@ fn a_partition_names_the_systems_it_carries() {
     std::fs::create_dir_all(hostile.join("etc")).unwrap();
     let fifo = hostile.join("etc/os-release");
     let path = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+    // SAFETY: `path` is a NUL-terminated string that outlives the call.
     assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
     assert!(labels_at(&hostile, "ext4").is_empty());
     // A symlink out of the mount names another filesystem's file, not this

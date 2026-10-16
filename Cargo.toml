@@ -23,6 +23,17 @@ tempfile = { version = "3.27.0", optional = true }
 # a bump here, which keeps the rev that was built with visible in `Cargo.lock`.
 common = { git = "https://github.com/tectonic-os/common", rev = "8ad7beb36fe5228b1ed17555faa113a78ca865c8" }
 
+# lint.sh runs clippy with -D warnings, so a lint set to warn here also
+# fails lint.sh.
+[lints.clippy]
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
+dbg_macro = "deny"
+todo = "deny"
+undocumented_unsafe_blocks = "deny"
+unimplemented = "deny"
+unwrap_used = "deny"
+
 [profile.release]
 opt-level = 1
 debug = false
