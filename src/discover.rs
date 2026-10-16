@@ -210,9 +210,7 @@ fn fstab_target(raw: &str, name: &str) -> String {
 const MOUNTS: &str = "/run/tect-old";
 
 fn mounts_root() -> PathBuf {
-    std::env::var_os("TECT_MOUNT_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(MOUNTS))
+    std::env::var_os("TECT_MOUNT_ROOT").map_or_else(|| PathBuf::from(MOUNTS), PathBuf::from)
 }
 
 /// Holds every mount the walk made and unmounts them when it drops. No
@@ -398,24 +396,31 @@ fn walk_disk(disk: &str, mounts: &mut Mounts) -> Walked {
         if !labels.is_empty() {
             walked.labels.push((device.clone(), labels));
         }
-        let fstab = at.join("etc/fstab");
-        if !fstab.is_file() {
+        let Some(fstab) = inside_file(&at, Path::new("etc/fstab")) else {
             continue;
+        };
+        match old_system(at, &fstab) {
+            Ok(system) => walked.systems.push(system),
+            Err(err) => walked.unread.push(err),
         }
-        // Each file is opened only where it is a regular file. A hostile old
-        // system otherwise names a FIFO, and the walk blocks on it with
-        // nothing drawn.
-        let crypttab = at.join("etc/crypttab");
-        walked.systems.push(OldSystem {
-            crypttab: match crypttab.is_file() {
-                true => std::fs::read_to_string(&crypttab).unwrap_or_default(),
-                false => String::new(),
-            },
-            fstab: std::fs::read_to_string(&fstab).unwrap_or_default(),
-            at,
-        });
     }
     walked
+}
+
+/// Reads the old system mounted at `at`. A crypttab that is there but
+/// unreadable makes the whole system unread, because an empty one would say the
+/// system names no key. An unreadable fstab does the same, because it names
+/// where each key goes.
+pub(crate) fn old_system(at: PathBuf, fstab: &Path) -> Result<OldSystem, String> {
+    let crypttab = match inside_file(&at, Path::new("etc/crypttab")) {
+        Some(crypttab) => read_lossy(&crypttab)?,
+        None => String::new(),
+    };
+    Ok(OldSystem {
+        crypttab,
+        fstab: read_lossy(fstab)?,
+        at,
+    })
 }
 
 /// Names the systems one mounted filesystem carries, for the child rows the
@@ -606,7 +611,7 @@ fn key_bytes(system: &OldSystem, entry: &Crypttab, mounts: &mut Mounts) -> Resul
             if removable(&resolved) {
                 return Err(copy::old_root_key_removable(&entry.name));
             }
-            let fstype = fstype_of(&resolved);
+            let fstype = fstype_of(&resolved)?;
             let at = mount_ro(&resolved, &fstype, mounts)?;
             key_file(&entry.name, &at, path)
         }
@@ -636,15 +641,34 @@ fn resolve_device(said: &str) -> Result<PathBuf, String> {
         .ok_or_else(|| format!("{said} is not present"))
 }
 
-/// Reads the filesystem a device carries. A `blkid` that does not say
-/// returns empty, and the mount then adds no `norecovery`.
-fn fstype_of(device: &Path) -> String {
-    Command::new("blkid")
+/// Reads the filesystem a device carries.
+fn fstype_of(device: &Path) -> Result<String, String> {
+    let out = Command::new("blkid")
         .args(["-s", "TYPE", "-o", "value"])
         .arg(device)
         .output()
-        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
-        .unwrap_or_default()
+        .map_err(|err| {
+            format!(
+                "blkid: {err}, and it is what reads the filesystem on {}",
+                device.display()
+            )
+        })?;
+    fstype_said(device, &out)
+}
+
+/// Any `blkid` failure refuses, because a journalled filesystem mounted
+/// without `norecovery` replays its journal onto the device. `blkid` exits 2
+/// both for a device with no filesystem it knows and for a device it could not
+/// probe, and a device with no filesystem holds no key file.
+pub(crate) fn fstype_said(device: &Path, out: &std::process::Output) -> Result<String, String> {
+    match out.status.code() {
+        Some(0) => Ok(String::from_utf8_lossy(&out.stdout).trim().to_string()),
+        _ => Err(format!(
+            "blkid could not read the filesystem on {}: {}",
+            device.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        )),
+    }
 }
 
 /// Holds the kernel's per-device flags. The `removable` flag sits on the
@@ -694,11 +718,19 @@ pub(crate) fn test_key(container: &str, key: &[u8]) -> Result<bool, String> {
     let mut child = command
         .spawn()
         .map_err(|err| format!("cryptsetup: {err}, and it is what tests a key"))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(key);
-    }
+    let written = child
+        .stdin
+        .take()
+        .map_or(Ok(()), |mut stdin| stdin.write_all(key));
     let status = child.wait().map_err(|err| format!("cryptsetup: {err}"))?;
-    Ok(status.success())
+    match written {
+        // A `cryptsetup` that exits before it reads the key closes the pipe,
+        // and its status is then the answer.
+        Err(err) if err.kind() != std::io::ErrorKind::BrokenPipe => Err(format!(
+            "cryptsetup: {err}, while the key was written to it"
+        )),
+        Ok(()) | Err(_) => Ok(status.success()),
+    }
 }
 
 /// Answers whether a key opens a LUKS partition.
@@ -805,8 +837,8 @@ impl Scan {
     /// read-only walk that names what each partition carries and proves the
     /// keys an old system holds. `table_changed` at confirm remains the guard
     /// against a disk that moves under the plan.
-    pub(crate) fn read() -> Self {
-        let in_use = in_use_now();
+    pub(crate) fn read() -> Result<Self, String> {
+        let in_use = in_use_now()?;
         let mut held = Mounts::default();
         let mut listed = Vec::new();
         let mut unread = Vec::new();
@@ -866,10 +898,10 @@ impl Scan {
                 keys,
             });
         }
-        Self {
+        Ok(Self {
             disks: found,
             unread,
-        }
+        })
     }
 
     /// Finds one disk's scan by the node that names it.
@@ -937,9 +969,7 @@ pub(crate) fn power_off() -> Result<(), String> {
 /// handed-over shell has no console of its own to leave. `Switch to shell`
 /// then means the shell the user ran it from.
 pub(crate) fn under_media_installer() -> bool {
-    std::fs::read_to_string("/proc/self/cgroup")
-        .map(|cgroup| media_installer(&cgroup))
-        .unwrap_or(false)
+    std::fs::read_to_string("/proc/self/cgroup").is_ok_and(|cgroup| media_installer(&cgroup))
 }
 
 fn media_installer(cgroup: &str) -> bool {

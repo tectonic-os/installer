@@ -14,6 +14,11 @@ pub(crate) fn install_actions() -> [&'static str; 4] {
 impl Answers {
     /// `None` means the user confirmed a leave before the installer touched a
     /// disk.
+    #[expect(
+        clippy::too_many_lines,
+        clippy::excessive_nesting,
+        reason = "the form loop holds the disk, layout and focus state the user changes between redraws"
+    )]
     pub fn collect(
         payload: &Payload,
         given: Given,
@@ -28,7 +33,7 @@ impl Answers {
         }
         // The installer reads every disk once before the form draws. A redraw
         // then cannot show a different disk than the previous screen.
-        let scan = Scan::read();
+        let scan = Scan::read()?;
         let mut disk = seeded.disk.clone();
         // One found disk nothing is on yet makes the disk question answer
         // itself. A disk holding partitions is the user's to choose.
@@ -427,7 +432,11 @@ impl Answers {
                                         }
                                     }
                                 }
-                                _ => {}
+                                PartAction::Reset
+                                | PartAction::Open
+                                | PartAction::Close
+                                | PartAction::Clear
+                                | PartAction::Create => {}
                             }
                         }
                         Some(RowKind::Part { index }) => {

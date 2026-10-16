@@ -20,9 +20,7 @@ pub(crate) const NONE: &str = "none";
 pub(crate) const TPM: &str = "/dev/tpmrm0";
 
 pub(crate) fn tpm() -> PathBuf {
-    std::env::var_os("TECT_TPM")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(TPM))
+    std::env::var_os("TECT_TPM").map_or_else(|| PathBuf::from(TPM), PathBuf::from)
 }
 
 /// Holds the whole disks the form offers.
@@ -32,9 +30,7 @@ const SYS_BLOCK: &str = "/sys/block";
 /// does. The form draws the disks this machine has, and no two machines
 /// running the drawn golden carry the same disks.
 pub(crate) fn sys_block() -> PathBuf {
-    std::env::var_os("TECT_SYS_BLOCK")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(SYS_BLOCK))
+    std::env::var_os("TECT_SYS_BLOCK").map_or_else(|| PathBuf::from(SYS_BLOCK), PathBuf::from)
 }
 
 /// Names the directory the installer opens a device path under.
@@ -47,9 +43,7 @@ const DEV: &str = "/dev";
 /// `device_path` in `table.rs` reads this, and it reads it in a debug build
 /// alone.
 pub(crate) fn dev() -> PathBuf {
-    std::env::var_os("TECT_DEV")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEV))
+    std::env::var_os("TECT_DEV").map_or_else(|| PathBuf::from(DEV), PathBuf::from)
 }
 
 /// Names the VT the kernel currently shows.
@@ -59,9 +53,7 @@ const TTY0_ACTIVE: &str = "/sys/class/tty/tty0/active";
 /// `$TECT_SYS_BLOCK` does. The note names the VT the installer is on, and a
 /// machine with no console reads nothing here.
 pub(crate) fn tty0_active() -> PathBuf {
-    std::env::var_os("TECT_TTY0_ACTIVE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(TTY0_ACTIVE))
+    std::env::var_os("TECT_TTY0_ACTIVE").map_or_else(|| PathBuf::from(TTY0_ACTIVE), PathBuf::from)
 }
 
 /// Holds the firmware's own variables.
@@ -71,7 +63,5 @@ const EFIVARS: &str = "/sys/firmware/efi/efivars";
 /// does. The panel states the firmware of the machine running it, and the
 /// drawn golden must state one fixture's.
 pub(crate) fn efivars() -> PathBuf {
-    std::env::var_os("TECT_EFIVARS")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(EFIVARS))
+    std::env::var_os("TECT_EFIVARS").map_or_else(|| PathBuf::from(EFIVARS), PathBuf::from)
 }

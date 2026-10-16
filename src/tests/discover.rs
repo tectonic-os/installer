@@ -586,3 +586,39 @@ fn the_walk_reads_every_mountable_node_and_no_container() {
         assert_eq!(mount_options(fstype), "ro", "{fstype}");
     }
 }
+
+/// A key device whose filesystem `blkid` cannot read would be mounted with no
+/// `norecovery`, and a dirty journal would then be replayed onto it.
+#[test]
+fn a_blkid_failure_refuses_the_key_device() {
+    use std::os::unix::process::ExitStatusExt as _;
+    let said = |code: i32, stdout: &str| std::process::Output {
+        status: std::process::ExitStatus::from_raw(code << 8),
+        stdout: stdout.as_bytes().to_vec(),
+        stderr: b"probe failed".to_vec(),
+    };
+    let device = Path::new("/dev/sdb1");
+    assert_eq!(fstype_said(device, &said(0, "ext4\n")).unwrap(), "ext4");
+    // Exit 2 also means a probe that failed.
+    assert!(fstype_said(device, &said(2, "")).is_err());
+    let refused = fstype_said(device, &said(4, "")).unwrap_err();
+    assert!(refused.contains("/dev/sdb1"), "{refused}");
+}
+
+/// A write-only crypttab fails the read the way a damaged old system does,
+/// and an empty crypttab would then say the system names no key.
+#[test]
+fn an_unreadable_crypttab_leaves_the_old_system_unread() {
+    if running_as_root() {
+        return;
+    }
+    let at = scratch("old-system-crypttab");
+    std::fs::create_dir_all(at.join("etc")).unwrap();
+    std::fs::write(at.join("etc/fstab"), "UUID=aa / ext4 defaults 0 1\n").unwrap();
+    write_only(&at.join("etc/crypttab"), b"root UUID=bb none luks\n");
+    let fstab = at.join("etc/fstab");
+    let Err(unread) = old_system(at.clone(), &fstab) else {
+        panic!("an unreadable crypttab read as a system");
+    };
+    assert!(unread.contains("etc/crypttab"), "{unread}");
+}

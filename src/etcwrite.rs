@@ -327,7 +327,7 @@ pub(crate) fn deployment(root: &Path) -> Result<(PathBuf, bool), String> {
 /// keys a crypttab entry by.
 pub(crate) fn merge_crypttab(etc: &Path, lines: &[(String, String)]) -> Result<(), String> {
     let at = etc.join("crypttab");
-    let held = std::fs::read_to_string(&at).unwrap_or_default();
+    let held = read_held(&at)?;
     let mut out: Vec<&str> = held
         .lines()
         .filter(|line| {
@@ -366,14 +366,29 @@ fn filesystem_uuid(device: &str) -> Result<String, String> {
     }
 }
 
+/// Reads a file the installer merges its own lines into. An absent file holds
+/// no lines. Any other failure refuses, because merging into an empty read
+/// would overwrite the lines the image shipped.
+pub(crate) fn read_held(at: &Path) -> Result<String, String> {
+    match std::fs::read(at) {
+        Ok(bytes) => Ok(String::from_utf8_lossy(&bytes).into_owned()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(err) => Err(format!("{}: {err}", at.display())),
+    }
+}
+
+/// Reads a system file as text. A byte that is not UTF-8 reads as U+FFFD, so
+/// a comment in another encoding keeps its line and refuses nothing.
+pub(crate) fn read_lossy(at: &Path) -> Result<String, String> {
+    std::fs::read(at)
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .map_err(|err| format!("{}: {err}", at.display()))
+}
+
 pub(crate) fn merge_fstab(etc: &Path, uuid: &str) -> Result<(), String> {
     let at = etc.join("fstab");
     let source = format!("UUID={uuid}");
-    let held = match std::fs::read_to_string(&at) {
-        Ok(held) => held,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(err) => return Err(format!("{}: {err}", at.display())),
-    };
+    let held = read_held(&at)?;
     let mut lines: Vec<&str> = held
         .lines()
         .filter(|line| line.split_whitespace().next() != Some(source.as_str()))
@@ -486,7 +501,7 @@ pub(crate) fn free_slot(keys: &[u32]) -> Result<u32, String> {
 pub(crate) fn auth_args(key: &Key) -> Vec<std::ffi::OsString> {
     match key {
         Key::File(path) => vec!["--key-file".into(), path.as_os_str().to_os_string()],
-        _ => vec!["--key-file".into(), "-".into()],
+        Key::Passphrase(_) | Key::Data(_) => vec!["--key-file".into(), "-".into()],
     }
 }
 
@@ -540,8 +555,7 @@ pub(crate) fn staged_key(key: &[u8]) -> Result<StagedKey, String> {
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_nanos())
-            .unwrap_or(0)
+            .map_or(0, |elapsed| elapsed.as_nanos())
     ));
     let mut file = std::fs::OpenOptions::new()
         .write(true)

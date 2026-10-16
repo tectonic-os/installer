@@ -28,11 +28,17 @@ common = { git = "https://github.com/tectonic-os/common", rev = "8ad7beb36fe5228
 [lints.clippy]
 allow_attributes = "deny"
 allow_attributes_without_reason = "deny"
+cast_possible_truncation = "warn"
 dbg_macro = "deny"
+excessive_nesting = "warn"
 todo = "deny"
+too_many_lines = "warn"
 undocumented_unsafe_blocks = "deny"
 unimplemented = "deny"
 unwrap_used = "deny"
+
+[lints.rust]
+unreachable_pub = "warn"
 
 [profile.release]
 opt-level = 1

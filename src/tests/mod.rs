@@ -40,6 +40,27 @@ sector-size: 512
 /dev/vda3 : start=       83968, size=       40960, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name=\"three\"
 ";
 
+/// Root reads a file whatever its mode, so a read failure forced by the mode
+/// cannot happen as root.
+fn running_as_root() -> bool {
+    // SAFETY: geteuid takes no argument and always succeeds.
+    unsafe { libc::geteuid() == 0 }
+}
+
+/// A file the user can write and not read, which fails a read and not a write.
+fn write_only(path: &Path, bytes: &[u8]) {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::write(path, bytes).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o200)).unwrap();
+}
+
+/// Makes a `write_only` file readable again and reads it back.
+fn readable(path: &Path) -> Vec<u8> {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    std::fs::read(path).unwrap()
+}
+
 fn scratch(name: &str) -> PathBuf {
     let root = std::env::temp_dir().join(format!("tect-install-{name}.{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);

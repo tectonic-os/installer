@@ -104,3 +104,18 @@ fn the_assign_list_follows_the_filesystem() {
     };
     assert_eq!(assigns(&partition(""), Some(&chosen), true), ["/boot/efi"]);
 }
+
+#[test]
+fn a_recipe_naming_an_unknown_boot_chain_is_refused() {
+    let root = scratch("unknown-boot-recipe");
+    let path = root.join(RECIPE);
+    let raw = EMITTED.replace(
+        "\"genericImage\": true,",
+        "\"genericImage\": true,\n  \"boot\": \"uki\",",
+    );
+    assert_ne!(raw, EMITTED);
+    std::fs::write(&path, raw).expect("a recipe");
+    let refused = InstallRecipe::read(&path).expect_err("an unknown chain is refused");
+    assert!(refused.contains("`boot` \"uki\""), "{refused}");
+    let _ = std::fs::remove_dir_all(root);
+}

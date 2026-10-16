@@ -552,6 +552,10 @@ fn partition_rows(
 
 /// Reads the leading number of a size string as whole GB. `"68.7 GB"` gives
 /// 68 and `"64G"` gives 64. A string with no leading number gives `None`.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "a float cast drops the fraction and saturates, and the parsed text carries no sign"
+)]
 pub(crate) fn size_gb(text: &str) -> Option<u64> {
     text.chars()
         .take_while(|letter| letter.is_ascii_digit() || *letter == '.')
@@ -976,7 +980,11 @@ fn ask_key(plain_root: bool) -> Result<Key, String> {
             &fields[1].value(),
             &fields[2].value(),
         )),
-        _ => Err(common::ui::INTERRUPTED.to_string()),
+        common::ui::Filled::Took(_)
+        | common::ui::Filled::Opened(_)
+        | common::ui::Filled::Changed(_)
+        | common::ui::Filled::Table { .. }
+        | common::ui::Filled::Left => Err(common::ui::INTERRUPTED.to_string()),
     }
 }
 
@@ -1039,10 +1047,10 @@ pub(crate) fn container_number(payload: &Payload) -> usize {
 /// contiguous. An image with no LUKS initramfs asks the kind row alone.
 pub(crate) fn luks_window_rows(chosen: &str, luks_initramfs: bool) -> Vec<usize> {
     match () {
-        _ if !luks_initramfs => vec![0],
-        _ if Encryption::wants_passphrase(chosen) => vec![0, 1, 2, 3],
-        _ if Encryption::wants_pin(chosen) => vec![0, 1, 4, 5],
-        _ => vec![0],
+        () if !luks_initramfs => vec![0],
+        () if Encryption::wants_passphrase(chosen) => vec![0, 1, 2, 3],
+        () if Encryption::wants_pin(chosen) => vec![0, 1, 4, 5],
+        () => vec![0],
     }
 }
 
@@ -1051,9 +1059,9 @@ pub(crate) fn luks_window_rows(chosen: &str, luks_initramfs: bool) -> Vec<usize>
 /// `None` and answers the window outright.
 pub(crate) fn luks_window_start(chosen: &str) -> Option<usize> {
     match () {
-        _ if Encryption::wants_passphrase(chosen) => Some(2),
-        _ if Encryption::wants_pin(chosen) => Some(4),
-        _ => None,
+        () if Encryption::wants_passphrase(chosen) => Some(2),
+        () if Encryption::wants_pin(chosen) => Some(4),
+        () => None,
     }
 }
 
@@ -1151,7 +1159,10 @@ pub(crate) fn edit_luks(
                     },
                 )));
             }
-            _ => return Ok(None),
+            common::ui::Filled::Opened(_)
+            | common::ui::Filled::Changed(_)
+            | common::ui::Filled::Table { .. }
+            | common::ui::Filled::Left => return Ok(None),
         }
     }
 }
@@ -1337,7 +1348,11 @@ pub(crate) fn ask_rename(partition: &str, held: &str) -> Result<Option<String>, 
     })?;
     match filled {
         common::ui::Filled::Took(0) => Ok(Some(fields[0].value())),
-        _ => Ok(None),
+        common::ui::Filled::Took(_)
+        | common::ui::Filled::Opened(_)
+        | common::ui::Filled::Changed(_)
+        | common::ui::Filled::Table { .. }
+        | common::ui::Filled::Left => Ok(None),
     }
 }
 

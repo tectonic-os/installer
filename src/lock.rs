@@ -9,9 +9,7 @@ use super::*;
 const LOCK: &str = "/run/tect-installer.lock";
 
 pub(crate) fn lock() -> PathBuf {
-    std::env::var_os("TECT_INSTALLER_LOCK")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(LOCK))
+    std::env::var_os("TECT_INSTALLER_LOCK").map_or_else(|| PathBuf::from(LOCK), PathBuf::from)
 }
 
 /// Names the terminal a process is sitting on.
@@ -73,6 +71,10 @@ pub fn hold() -> Result<std::fs::File, String> {
 }
 
 /// Takes the lock at a path a test can own.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "`struct flock` holds the small `c_int` lock and seek constants as `c_short`"
+)]
 pub(crate) fn hold_at(path: &Path) -> Result<std::fs::File, String> {
     use std::os::fd::AsRawFd as _;
 
