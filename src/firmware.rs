@@ -45,7 +45,7 @@ pub struct Firmware {
 
 impl Default for Firmware {
     fn default() -> Self {
-        Firmware {
+        Self {
             efivars: false,
             secure_boot: None,
             setup_mode: None,
@@ -60,13 +60,13 @@ impl Firmware {
     /// mount point. `owner` carries the owner certificate's DER bytes where
     /// the caller knows them. Every variable value carries a four-byte
     /// attribute header, which this skips.
-    pub fn read(root: &Path, owner: Option<&[u8]>) -> Firmware {
+    pub fn read(root: &Path, owner: Option<&[u8]>) -> Self {
         let Ok(entries) = std::fs::read_dir(root) else {
-            return Firmware::default();
+            return Self::default();
         };
-        let mut firmware = Firmware {
+        let mut firmware = Self {
             efivars: true,
-            ..Firmware::default()
+            ..Self::default()
         };
         // Holds the platform key as the loop actually read it. The loop
         // treats unread and absent alike. The answer below separates them.

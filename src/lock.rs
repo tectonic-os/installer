@@ -9,9 +9,7 @@ use super::*;
 const LOCK: &str = "/run/tect-installer.lock";
 
 pub(crate) fn lock() -> PathBuf {
-    std::env::var_os("TECT_INSTALLER_LOCK")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(LOCK))
+    std::env::var_os("TECT_INSTALLER_LOCK").map_or_else(|| PathBuf::from(LOCK), PathBuf::from)
 }
 
 /// Names the terminal a process is sitting on.
@@ -73,6 +71,10 @@ pub fn hold() -> Result<std::fs::File, String> {
 }
 
 /// Takes the lock at a path a test can own.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "`struct flock` holds the small `c_int` lock and seek constants as `c_short`"
+)]
 pub(crate) fn hold_at(path: &Path) -> Result<std::fs::File, String> {
     use std::os::fd::AsRawFd as _;
 
@@ -101,6 +103,8 @@ pub(crate) fn hold_at(path: &Path) -> Result<std::fs::File, String> {
     // Two passes, because `F_GETLK` answers `F_UNLCK` when the holder exited
     // between the two calls. The second pass takes the lock the holder freed.
     for _ in 0..2 {
+        // SAFETY: `file` keeps the descriptor open, and the `flock` value
+        // outlives the call.
         if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETLK, &wrlck()) } != -1 {
             return Ok(file);
         }
@@ -113,6 +117,8 @@ pub(crate) fn hold_at(path: &Path) -> Result<std::fs::File, String> {
             ));
         }
         let mut holder = wrlck();
+        // SAFETY: `file` keeps the descriptor open, and `F_GETLK` writes one
+        // `flock` into `holder`.
         if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETLK, &mut holder) } == -1 {
             break;
         }

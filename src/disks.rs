@@ -10,8 +10,9 @@ const VIRTUAL: [&str; 7] = ["loop", "ram", "zram", "sr", "fd", "dm-", "md"];
 
 /// Reads what `/proc/mounts` says. One read serves a whole listing, and
 /// handing the text in lets a test drive the rule below.
-pub(crate) fn in_use_now() -> String {
-    std::fs::read_to_string("/proc/mounts").unwrap_or_default()
+pub(crate) fn in_use_now() -> Result<String, String> {
+    read_lossy(Path::new("/proc/mounts"))
+        .map_err(|err| format!("{err}, and it is what says which disk holds this installer"))
 }
 
 /// Whether the running system is already using this disk.
@@ -105,7 +106,7 @@ pub(crate) fn ask_disk(
     if let Some(disk) = given.filter(|disk| !disk.is_empty()) {
         return Ok(disk);
     }
-    let found = disks(&sys_block(), &in_use_now());
+    let found = disks(&sys_block(), &in_use_now()?);
     if !prompt.asks() || found.is_empty() {
         return prompt.text(None, copy::INSTALL_DISK, "--disk", current);
     }
@@ -177,13 +178,13 @@ pub(crate) fn kinds(tpm: bool, luks_initramfs: bool, with_none: bool) -> Vec<Cho
         .iter()
         .filter(|(name, _, _)| with_none || *name != NONE)
         .map(|(name, shown, detail)| match () {
-            _ if *name != NONE && !luks_initramfs => Choice::new(*shown, copy::NO_LUKS_INITRAMFS)
+            () if *name != NONE && !luks_initramfs => Choice::new(*shown, copy::NO_LUKS_INITRAMFS)
                 .unavailable()
                 .hidden(),
-            _ if !tpm && name.starts_with("tpm2") => {
+            () if !tpm && name.starts_with("tpm2") => {
                 Choice::new(*shown, copy::NO_TPM).unavailable().hidden()
             }
-            _ => Choice::new(*shown, *detail),
+            () => Choice::new(*shown, *detail),
         })
         .collect()
 }

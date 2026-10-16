@@ -49,29 +49,36 @@ pub(crate) fn configure_boot_chain(image: &str, disk: &str, chain: &str) -> Resu
                     "{}: bootc did not install the {chain} enrollment key",
                     key.display()
                 )),
-                None => {
-                    let loader = esp.join("loader/loader.conf");
-                    let current = std::fs::read_to_string(&loader).unwrap_or_default();
-                    let mut lines: Vec<&str> = current
-                        .lines()
-                        .filter(|line| !line.trim_start().starts_with("secure-boot-enroll "))
-                        .collect();
-                    lines.push("secure-boot-enroll force");
-                    std::fs::write(&loader, format!("{}\n", lines.join("\n")))
-                        .map_err(|err| format!("{}: {err}", loader.display()))
-                }
+                None => enroll_force(&esp.join("loader/loader.conf")),
             }
         }
         "uki-shim" => run_enrolment(image, &esp),
         _ => Err(format!("unknown boot chain `{chain}`")),
     };
-    let unmounted = Command::new("umount").arg(&boot).output();
+    let unmounted = unmount(&device, &boot);
     configured?;
-    match unmounted {
-        Ok(out) if out.status.success() => {
-            eprintln!("{PROGRAM}: configured {chain} on {device}");
-            Ok(())
-        }
+    unmounted?;
+    eprintln!("{PROGRAM}: configured {chain} on {device}");
+    Ok(())
+}
+
+/// Keeps the lines bootc wrote to `loader.conf` and sets the enrolment line.
+pub(crate) fn enroll_force(loader: &Path) -> Result<(), String> {
+    let current = read_held(loader)?;
+    let mut lines: Vec<&str> = current
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("secure-boot-enroll "))
+        .collect();
+    lines.push("secure-boot-enroll force");
+    std::fs::write(loader, format!("{}\n", lines.join("\n")))
+        .map_err(|err| format!("{}: {err}", loader.display()))
+}
+
+/// A boot partition left mounted stays under the next mount the installer
+/// stacks at the same path.
+fn unmount(device: &str, at: &Path) -> Result<(), String> {
+    match Command::new("umount").arg(at).output() {
+        Ok(out) if out.status.success() => Ok(()),
         Ok(out) => Err(format!(
             "unmounting {device}: {}",
             String::from_utf8_lossy(&out.stderr).trim()
@@ -212,7 +219,8 @@ pub(crate) fn render_menu(image: &str, disk: &str) -> Result<(), String> {
         ));
     };
     let rendered = run_renderer(image, root);
-    let _ = Command::new("umount").arg(&boot).output();
+    let unmounted = unmount(&device, &boot);
+    let rendered = rendered.and_then(|wrote| unmounted.map(|()| wrote));
     match rendered {
         Ok(true) => {
             eprintln!("{PROGRAM}: wrote the boot menu {device} needs, since its GRUB reads no BLS");
@@ -249,7 +257,7 @@ fn boot_partition(disk: &str, boot: &Path) -> Result<Option<(String, &'static st
         if boot.join("boot/loader/entries").is_dir() || boot.join("boot/EFI/Linux").is_dir() {
             return Ok(Some((device, "/target/boot")));
         }
-        let _ = Command::new("umount").arg(boot).output();
+        unmount(&device, boot)?;
     }
     Ok(None)
 }

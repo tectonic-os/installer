@@ -274,6 +274,10 @@ fn the_passphrase_is_never_a_row_and_the_manual_rows_come_and_go() {
 /// Four answers nothing derives block Install. The form also checks the two
 /// password halves agree, which a question sequence had to ask twice for.
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "every case reads the form fixtures the closures at the top build"
+)]
 fn the_action_says_what_the_form_is_short_of() {
     use common::ui::{Choice, Field};
     let form = |password: &str, confirm: &str, kind: &str, passphrase: &str| {

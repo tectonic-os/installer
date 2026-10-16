@@ -637,6 +637,9 @@ pub fn writing(log: Option<&std::path::Path>) -> String {
         None => "disk being overwritten; this screen is the only log".to_string(),
     }
 }
+pub fn log_stopped(why: &str) -> String {
+    format!("the install log stops here: {why}")
+}
 
 /// This key is the only copy the user will ever get. The disk does not open
 /// without it if the TPM stops answering.

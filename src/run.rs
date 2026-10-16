@@ -42,6 +42,7 @@ fn installed(
     let karg = root_luks_arg(&prepared.layout, &payload.boot)?;
     let mut command = bootc_command(&payload.install, karg.as_deref());
     let (mut log, at) = open_log(payload);
+    let mut stopped = None;
     // Printed only where no widget draws. On the installer's own screen this
     // line would land above the box and stay there, because a bounded region
     // redraws itself and never the row over it.
@@ -101,15 +102,15 @@ fn installed(
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             };
-            if let Some(log) = &mut log {
-                let _ = writeln!(log, "{line}");
+            // Stopping on a failed log write would abandon a running bootc, so
+            // the screen says where the transcript ends instead.
+            if let Some(err) = log.as_mut().and_then(|log| writeln!(log, "{line}").err()) {
+                log = None;
+                let note = copy::log_stopped(&err.to_string());
+                shown(&mut region, &note);
+                stopped = Some(note);
             }
-            match &mut region {
-                None => println!("{line}"),
-                Some(region) => {
-                    let _ = region.note(&line);
-                }
-            }
+            shown(&mut region, &line);
         }
     }
     let finished = child.wait().map_err(|err| format!("podman: {err}"));
@@ -118,6 +119,11 @@ fn installed(
             let _ = region.step(100, 0, "Operating system installed");
         }
         region.close();
+    }
+    // The region scrolls the note away and clears itself, so a later error
+    // that names the log would send the user to a transcript cut short.
+    if let Some(note) = &stopped {
+        eprintln!("{PROGRAM}: {note}");
     }
     let status = finished?;
     if !status.success() {
@@ -443,4 +449,15 @@ pub fn own_screen(payload: &Payload, prompt: &Prompt) {
     print!("\u{1b}[2J\u{1b}[H");
     let _ = std::io::stdout().flush();
     common::ui::own_screen(copy::installing(&image_name(&payload.image)));
+}
+
+/// Puts one bootc line on the progress region, or prints it where none is
+/// drawn. A failed draw is not a failed install, and the log keeps the line.
+fn shown(region: &mut Option<common::ui::Progress>, line: &str) {
+    match region {
+        None => println!("{line}"),
+        Some(region) => {
+            let _ = region.note(line);
+        }
+    }
 }

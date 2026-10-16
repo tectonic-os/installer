@@ -276,7 +276,7 @@ pub(crate) fn at_boot(open: &LuksOpen, opened: Opened) -> &'static str {
     if open.target == "/" {
         return match open.key {
             Key::Passphrase(_) => copy::BOOT_PASSPHRASE,
-            _ => copy::OPENED_ROOT_KEYFILE,
+            Key::File(_) | Key::Data(_) => copy::OPENED_ROOT_KEYFILE,
         };
     }
     match (&open.key, opened) {
