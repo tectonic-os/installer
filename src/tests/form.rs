@@ -180,19 +180,7 @@ fn the_confirm_screen_shows_what_is_about_to_be_erased() {
         layout: None,
     };
     assert_eq!(
-        answers.summary(&Payload {
-            recipe: "/mnt/tect/install-recipe.json".into(),
-            install: an_install_recipe(),
-            image: "ghcr.io/tectonic-os/deb2:latest".to_string(),
-            hostname: "deb2".to_string(),
-            filesystem: "ext4".to_string(),
-            bootloader: "grub2".to_string(),
-            boot: String::new(),
-            composefs: false,
-            reserve: std::sync::OnceLock::new(),
-            luks_initramfs: true,
-            esp_entries: std::sync::OnceLock::new(),
-        }),
+        answers.summary(&a_payload()),
         vec![
             (copy::ROW_DISK.to_string(), "/dev/vda".to_string()),
             (copy::ROW_HOSTNAME.to_string(), "deb2".to_string()),

@@ -35,38 +35,22 @@ fn a_new_key_takes_the_first_free_slot() {
     assert!(free_slot(&full).is_err());
 }
 
-fn answers(kind: &str, passphrase: &str) -> Answers {
-    Answers {
-        disk: "/dev/vda".to_string(),
-        hostname: "host".to_string(),
-        user: "user".to_string(),
-        password: "secret".to_string(),
-        encryption: Encryption {
-            kind: kind.to_string(),
-            passphrase: passphrase.to_string(),
-            pin: String::new(),
-        },
-        layout: None,
-        opened: Opened::Keep,
-    }
-}
-
 /// The kinds that stage a first-boot enrolment are the ones whose completion
 /// screen offers to finalize. `layout::seal` generates the recovery key of a
 /// `tpm2-luks` kind. The passphrase kind carries its own key.
 #[test]
 fn only_a_staged_enrolment_has_a_key_to_finalize_with() {
-    let no_event = unlocking_key(&answers("tpm2-luks", ""), None);
+    let no_event = unlocking_key(&answered("tpm2-luks", ""), None);
     assert!(no_event.is_none(), "a lost recovery key offers nothing");
-    let (key, pin) = unlocking_key(&answers("tpm2-luks", ""), Some("recovery")).expect("a key");
+    let (key, pin) = unlocking_key(&answered("tpm2-luks", ""), Some("recovery")).expect("a key");
     assert_eq!(key.bytes(), Some(b"recovery".as_slice()));
     assert!(!pin);
-    let (_, pin) = unlocking_key(&answers("tpm2-luks-pin", ""), Some("recovery")).expect("a key");
+    let (_, pin) = unlocking_key(&answered("tpm2-luks-pin", ""), Some("recovery")).expect("a key");
     assert!(pin, "a PIN kind states its window");
-    let (key, _) = unlocking_key(&answers("tpm2-luks-passphrase", "chosen"), None).expect("a key");
+    let (key, _) = unlocking_key(&answered("tpm2-luks-passphrase", "chosen"), None).expect("a key");
     assert_eq!(key.bytes(), Some(b"chosen".as_slice()));
-    assert!(unlocking_key(&answers("luks-passphrase", "chosen"), None).is_none());
-    assert!(unlocking_key(&answers("none", ""), None).is_none());
+    assert!(unlocking_key(&answered("luks-passphrase", "chosen"), None).is_none());
+    assert!(unlocking_key(&answered("none", ""), None).is_none());
 }
 
 /// A layout's automatic action is for the root alone. A kept container and a
@@ -82,7 +66,7 @@ fn a_layout_finalizes_only_an_opened_root() {
         }],
         ..Default::default()
     };
-    let mut held = answers("luks-passphrase", "chosen");
+    let mut held = answered("luks-passphrase", "chosen");
     held.opened = Opened::Tpm2;
     held.layout = Some(opened.clone());
     let (key, pin) = unlocking_key(&held, None).expect("a key");
@@ -174,11 +158,11 @@ fn a_failed_seal_leaves_the_slot_marker_behind() {
 fn a_grub_image_is_refused_before_the_image_probe() {
     let payload = a_payload();
     assert!(payload.boot.is_empty());
-    match offered(&payload, &answers("tpm2-luks", ""), Some("recovery")) {
+    match offered(&payload, &answered("tpm2-luks", ""), Some("recovery")) {
         Offered::Unavailable(why) => assert_eq!(why, copy::AUTO_NO_STUB),
         _ => panic!("a chain without systemd-stub was offered the action"),
     }
-    match offered(&payload, &answers("none", ""), None) {
+    match offered(&payload, &answered("none", ""), None) {
         Offered::None => {}
         _ => panic!("an install with no enrolment was offered the action"),
     }

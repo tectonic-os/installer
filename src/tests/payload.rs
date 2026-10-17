@@ -153,3 +153,101 @@ fn a_root_with_nothing_built_on_it_refuses_by_name() {
     let repo = Found::Repo("/mnt/tect".into()).payload().unwrap_err();
     assert!(repo.contains("tect build"), "{repo}");
 }
+
+/// A payload records its image ID in a file of its own, and a hand-written
+/// payload records none.
+#[test]
+fn the_recorded_image_id_is_read_beside_the_recipe() {
+    let root = scratch("image-id");
+    assert_eq!(recorded_id(&root), Ok(None));
+    std::fs::write(root.join(IMAGE_ID), format!("{AN_IMAGE_ID}\n")).expect("an image-id");
+    assert_eq!(recorded_id(&root), Ok(ImageId::parse(AN_IMAGE_ID)));
+    std::fs::write(root.join(IMAGE_ID), "sha256:abc\n").expect("a malformed image-id");
+    let refused = recorded_id(&root).unwrap_err();
+    assert!(
+        refused.contains(IMAGE_ID) && refused.contains("sha256:abc"),
+        "{refused}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The read back discards the image, so podman writes it to a stream and
+/// needs no output file as large as the image.
+#[test]
+fn the_read_back_streams_the_whole_image_to_nowhere() {
+    let command = read_back("ghcr.io/tectonic-os/deb2:latest");
+    assert_eq!(command.get_program(), "podman");
+    let args: Vec<_> = command.get_args().collect();
+    assert_eq!(
+        args,
+        [
+            "save",
+            "--quiet",
+            "--format",
+            "docker-archive",
+            "--output",
+            "/dev/stdout",
+            "ghcr.io/tectonic-os/deb2:latest"
+        ]
+    );
+}
+
+/// Another image under the same name is refused by its ID.
+#[test]
+fn an_image_under_another_id_is_refused() {
+    let (root, conf) = imported_store("image-id-check");
+    let inspected = in_store(inspect(STORED, "{{.Id}}"), &conf);
+    let id = String::from_utf8_lossy(&inspected.stdout)
+        .trim()
+        .to_string();
+    let stored = ImageId::parse(&id).expect("podman names a 64-digit ID");
+    assert_eq!(same_image(STORED, &stored, &inspected), Ok(()));
+    let other = ImageId::parse(AN_IMAGE_ID).expect("the fixture ID parses");
+    let refused = same_image(STORED, &other, &inspected).unwrap_err();
+    assert!(
+        refused.contains(&id) && refused.contains(AN_IMAGE_ID),
+        "{refused}"
+    );
+    remove_store(&root);
+}
+
+/// This is the hazard the check exists for: the store still names the image
+/// by the ID it was built with after one of its bytes changed.
+#[test]
+fn an_altered_image_byte_fails_the_read_back() {
+    let (root, conf) = imported_store("read-back");
+    let clean = in_store(read_back(STORED), &conf);
+    assert_eq!(read_whole(STORED, clean.status, ""), Ok(()));
+
+    alter_layer(&root);
+
+    let altered = in_store(read_back(STORED), &conf);
+    let refused = read_whole(
+        STORED,
+        altered.status,
+        &String::from_utf8_lossy(&altered.stderr),
+    )
+    .unwrap_err();
+    assert!(refused.contains("integrity"), "{refused}");
+    remove_store(&root);
+}
+
+/// A full temporary directory says what the read needs, because rebuilding the
+/// media would not help.
+#[test]
+fn a_read_back_out_of_space_names_the_space_it_needs() {
+    use std::os::unix::process::ExitStatusExt as _;
+    let failed = std::process::ExitStatus::from_raw(125 << 8);
+    let full = read_whole(
+        STORED,
+        failed,
+        "Error: writing blob: write /var/tmp/container_images_1: no space left on device",
+    )
+    .unwrap_err();
+    assert!(
+        full.contains("largest layer") && !full.contains("rebuild"),
+        "{full}"
+    );
+    let altered = read_whole(STORED, failed, "file integrity checksum failed").unwrap_err();
+    assert!(altered.contains("rebuild"), "{altered}");
+}

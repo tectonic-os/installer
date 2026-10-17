@@ -42,17 +42,8 @@ fn the_panel_states_the_firmware_and_what_the_image_needs() {
     use crate::firmware::{Firmware, PlatformKey};
     use common::ui::HeaderLine;
     let payload = |boot: &str| Payload {
-        recipe: "/mnt/tect/install-recipe.json".into(),
-        install: an_install_recipe(),
-        image: "ghcr.io/tectonic-os/deb2:latest".to_string(),
-        hostname: "deb2".to_string(),
-        filesystem: "ext4".to_string(),
-        bootloader: "grub2".to_string(),
         boot: boot.to_string(),
-        composefs: false,
-        reserve: std::sync::OnceLock::new(),
-        luks_initramfs: true,
-        esp_entries: std::sync::OnceLock::new(),
+        ..a_payload()
     };
     let payload_of = |boot: &str, bootloader: &str| Payload {
         bootloader: bootloader.to_string(),
@@ -282,4 +273,22 @@ fn the_erase_warning_matches_the_cases_next_steps_asks_for() {
     assert!(erase_warning("uki-shim", &with(PlatformKey::Other, false)).is_empty());
     assert!(erase_warning("", &with(PlatformKey::Other, false)).is_empty());
     assert!(erase_warning("uki-db", &Firmware::default()).is_empty());
+}
+
+/// A payload that records no image ID is one the installer cannot compare, and
+/// the panel says so in the warning colour before the user erases a disk.
+#[test]
+fn an_unrecorded_image_id_is_a_warning_row() {
+    use common::ui::HeaderLine;
+    let firmware = crate::firmware::Firmware::read(Path::new("/nonexistent"), None);
+    let recorded = panel_lines(&firmware, &a_payload());
+    assert!(recorded.iter().any(|line| matches!(line,
+        HeaderLine::Pair(label, value) if label == copy::PANEL_IMAGE_ID && value == &AN_IMAGE_ID[..12])));
+    let unrecorded = Payload {
+        image_id: None,
+        ..a_payload()
+    };
+    let lines = panel_lines(&firmware, &unrecorded);
+    assert!(lines.iter().any(|line| matches!(line,
+        HeaderLine::Warn(label, value) if label == copy::PANEL_IMAGE_ID && value == copy::IMAGE_ID_UNRECORDED)));
 }

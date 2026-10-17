@@ -247,3 +247,63 @@ fn the_last_screen_explains_the_two_actions() {
         "an unavailable action draws no window"
     );
 }
+
+/// The parent test below runs this in a process of its own, because `run`
+/// reaches podman through the environment, and the store it must read is
+/// the parent's scratch store.
+#[test]
+#[ignore]
+fn installs_from_the_payload_the_parent_staged() {
+    let root = PathBuf::from(
+        std::env::var("TECT_TEST_PAYLOAD").expect("the payload is staged only by its parent test"),
+    );
+    let Ok(Found::Image(payload)) = classify(&root) else {
+        panic!("the parent stages a payload");
+    };
+    let mut answers = answered(NONE, "");
+    answers.disk = "/dev/tect-test-absent".to_string();
+    let refused = run(&payload, &mut answers, &Prompt::silent()).expect_err("an altered image");
+    std::fs::write(root.join("refused"), refused).expect("the child reports the refusal");
+}
+
+/// This is the hazard the guard exists for. Without it, an altered image
+/// would reach `prepare` and the disk. `validate_recipe` first needs
+/// `/etc/containers/storage.conf`, which installer media carries and a bootc
+/// host keeps under `/usr/share` instead, so the case runs on the media.
+#[test]
+#[ignore]
+fn an_install_from_an_altered_image_is_refused_before_the_disk() {
+    let (root, conf) = imported_store("run-guard");
+    let inspected = in_store(inspect(STORED, "{{.Id}}"), &conf);
+    std::fs::write(root.join(IMAGE_ID), &inspected.stdout).expect("an image-id");
+    let graph = root.join("graph");
+    std::fs::write(
+        root.join(RECIPE),
+        format!(
+            "{{\"image\": \"{STORED}\", \"hostname\": \"host\", \"filesystem\": \"ext4\", \
+             \"bootloader\": \"grub2\", \"additionalImageStores\": [\"{}\"]}}",
+            graph.display()
+        ),
+    )
+    .expect("a recipe");
+    alter_layer(&root);
+
+    let child = Command::new(std::env::current_exe().expect("the test binary"))
+        .args([
+            "--ignored",
+            "--exact",
+            "tests::run::installs_from_the_payload_the_parent_staged",
+        ])
+        .env("CONTAINERS_STORAGE_CONF", &conf)
+        .env("TECT_TEST_PAYLOAD", &root)
+        .output()
+        .expect("the test binary re-runs itself as the install");
+    assert!(
+        child.status.success(),
+        "{}",
+        String::from_utf8_lossy(&child.stdout)
+    );
+    let refused = std::fs::read_to_string(root.join("refused")).expect("the child's refusal");
+    assert!(refused.contains("does not read back"), "{refused}");
+    remove_store(&root);
+}

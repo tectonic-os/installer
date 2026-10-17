@@ -4,6 +4,11 @@ use super::*;
 /// and `tect vm build iso` bakes it onto installer media.
 pub const RECIPE: &str = "install-recipe.json";
 
+/// Names the file beside the recipe that holds the ID of the image the media
+/// was built to install. `tect vm build iso` writes it from the store that
+/// tacklebox copies the image out of.
+pub const IMAGE_ID: &str = "image-id";
+
 /// Returns the root `--from` defaults to, which is the directory holding the
 /// build's own documents. Installer media carries its recipe there, beside the
 /// manifest.
@@ -23,6 +28,9 @@ pub struct Payload {
     /// Names the reference bootc installs. On media this is the published
     /// name the local bytes are embedded under.
     pub image: String,
+    /// Holds the ID the image was built with. A hand-written payload may
+    /// record none, and the panel then says that the identity is unchecked.
+    pub image_id: Option<ImageId>,
     /// Names the installed machine. This is the one derived value the
     /// installer expects the user to replace.
     pub hostname: String,
@@ -113,11 +121,7 @@ pub(crate) fn root_reserve(image_gb: &Option<u64>) -> u64 {
 /// the screens say it. An image that is absent, or a podman that cannot
 /// answer, returns `None`.
 fn image_gb(image: &str) -> Option<u64> {
-    let out = Command::new("podman")
-        .args(["image", "inspect", "--format", "{{.Size}}"])
-        .arg(image)
-        .output()
-        .ok()?;
+    let out = inspect(image, "{{.Size}}").output().ok()?;
     match out.status.success() {
         true => image_size(&String::from_utf8_lossy(&out.stdout)),
         false => None,
@@ -190,6 +194,7 @@ pub fn classify(root: &Path) -> Result<Found, String> {
         let install = InstallRecipe::read(&recipe)?;
         return Ok(Found::Image(Payload {
             image: install.image.clone(),
+            image_id: recorded_id(root)?,
             hostname: install.hostname.clone(),
             filesystem: install.filesystem.clone(),
             bootloader: install.bootloader.clone(),
@@ -206,6 +211,117 @@ pub fn classify(root: &Path) -> Result<Found, String> {
         true => Found::Repo(root.to_path_buf()),
         false => Found::Nothing(root.to_path_buf()),
     })
+}
+
+/// Holds an image ID, which is 64 lowercase hex digits. The type makes the
+/// short form the panel shows safe to take.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageId(String);
+
+impl ImageId {
+    pub(crate) fn parse(text: &str) -> Option<Self> {
+        let digits =
+            text.len() == 64 && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+        digits.then(|| Self(text.to_string()))
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Returns the form `podman images` prints.
+    pub(crate) fn short(&self) -> &str {
+        &self.0[..12]
+    }
+}
+
+/// An absent `image-id` is a payload that records none, which a hand-written
+/// payload is free to be.
+pub(crate) fn recorded_id(root: &Path) -> Result<Option<ImageId>, String> {
+    let path = root.join(IMAGE_ID);
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(format!("{}: {err}", path.display())),
+    };
+    let id = raw.trim();
+    ImageId::parse(id).map(Some).ok_or_else(|| {
+        format!(
+            "{}: `{id}` is not an image ID, which is 64 lowercase hex digits",
+            path.display()
+        )
+    })
+}
+
+pub(crate) fn inspect(image: &str, format: &str) -> Command {
+    let mut command = Command::new("podman");
+    command.args(["image", "inspect", "--format", format, image]);
+    command
+}
+
+/// `inspected` is the output of `inspect` with the `{{.Id}}` format.
+pub(crate) fn same_image(
+    image: &str,
+    recorded: &ImageId,
+    inspected: &std::process::Output,
+) -> Result<(), String> {
+    if !inspected.status.success() {
+        return Err(format!(
+            "podman cannot inspect {image}: {}",
+            String::from_utf8_lossy(&inspected.stderr).trim()
+        ));
+    }
+    let found = String::from_utf8_lossy(&inspected.stdout)
+        .trim()
+        .to_string();
+    match found == recorded.as_str() {
+        true => Ok(()),
+        false => Err(format!(
+            "{image} is image {found}, and this media was built to install {}; \
+             rebuild the media with `tect vm build iso`",
+            recorded.as_str()
+        )),
+    }
+}
+
+/// containers/image checks each layer file against the layer's tar-split
+/// record while it reads, so an altered byte fails the read and names the
+/// layer. The archive goes to a discarded stream. podman still buffers one
+/// layer at a time in a temporary file under `TMPDIR`.
+pub(crate) fn read_back(image: &str) -> Command {
+    let mut command = Command::new("podman");
+    command.args([
+        "save",
+        "--quiet",
+        "--format",
+        "docker-archive",
+        "--output",
+        "/dev/stdout",
+        image,
+    ]);
+    command
+}
+
+/// `stderr` is what `read_back` wrote. A full temporary directory is no
+/// defect of the image, so that failure names the space it needs instead.
+pub(crate) fn read_whole(
+    image: &str,
+    status: std::process::ExitStatus,
+    stderr: &str,
+) -> Result<(), String> {
+    let said = stderr.trim();
+    match (status.success(), said.contains("no space left on device")) {
+        (true, _) => Ok(()),
+        (false, true) => Err(format!(
+            "reading {image} back needs free space as large as its largest layer, and the \
+             temporary directory ran out: {said}\n\nhelp: set TMPDIR to a directory with \
+             room, or use a machine with more memory, where this environment keeps /var/tmp"
+        )),
+        (false, false) => Err(format!(
+            "{image} does not read back as the bytes it was stored with: {said}; rebuild \
+             the media with `tect vm build iso`"
+        )),
+    }
 }
 
 /// Labels a payload partition. This label is the whole rule for finding a
