@@ -218,10 +218,13 @@ fn imported_store(name: &str) -> (PathBuf, PathBuf) {
         .expect("tar runs");
     assert!(packed.success(), "tar packs the layer");
     let conf = root.join("storage.conf");
+    // Some rootless podman releases ignore `graphroot` and read
+    // `rootless_storage_path`, so both name the scratch store.
     std::fs::write(
         &conf,
         format!(
-            "[storage]\ndriver = \"vfs\"\ngraphroot = \"{0}/graph\"\nrunroot = \"{0}/run\"\n",
+            "[storage]\ndriver = \"vfs\"\ngraphroot = \"{0}/graph\"\n\
+             rootless_storage_path = \"{0}/graph\"\nrunroot = \"{0}/run\"\n",
             root.display()
         ),
     )
