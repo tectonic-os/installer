@@ -21,7 +21,7 @@ libc = "0.2"
 tempfile = { version = "3.27.0", optional = true }
 # Pinned by rev, never by version. A change in `common` is a commit there and
 # a bump here, which keeps the rev that was built with visible in `Cargo.lock`.
-common = { git = "https://github.com/tectonic-os/common", rev = "8ad7beb36fe5228b1ed17555faa113a78ca865c8" }
+common = { git = "https://github.com/tectonic-os/common", rev = "59d21ecf99d7efe018aa205edb8e8bfba5cf4a44" }
 
 # lint.sh runs clippy with -D warnings, so a lint set to warn here also
 # fails lint.sh.
@@ -58,5 +58,5 @@ codegen-units = 1
 # Renders `docs/commands.md` in a test, so it never reaches a dist binary.
 [dev-dependencies]
 clap-markdown = "0.1.5"
-common = { git = "https://github.com/tectonic-os/common", rev = "8ad7beb36fe5228b1ed17555faa113a78ca865c8", features = ["test-support"] }
+common = { git = "https://github.com/tectonic-os/common", rev = "59d21ecf99d7efe018aa205edb8e8bfba5cf4a44", features = ["test-support"] }
 insta = { version = "1.49.0", default-features = false }
