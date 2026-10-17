@@ -6,8 +6,9 @@ document, and the image the recipe names. This file states what each one must
 hold, so a bootc workflow that never ran `tect` can write the same input.
 
 Nothing here opens the image to read a plan out of it. Every image fact the
-installer uses is either a field of the recipe or a file it probes for by
-running the image under podman, and both lists are below in full.
+installer uses is a field of the recipe, the `image-id` beside it, or a file it
+probes for by running the image under podman. The sections below name each
+one.
 
 ## The recipe floor
 
@@ -45,6 +46,24 @@ every filesystem the plan formats before the cut, so a filesystem it has no
 root, which `xfs` has not got, so `InstallRecipe::read` refuses that pair. The
 installer formats the whole-disk root and an opened old root with the recipe's
 `filesystem`, and the manual editor applies the same rule to any other root.
+
+### The image ID beside the recipe
+
+`image-id` beside `install-recipe.json` holds the ID of the image the media was
+built to install, as 64 lowercase hex digits. `tect vm build iso` writes it
+from the store that the media copies its image out of. The file is optional,
+and `recorded_id` in `src/payload.rs` refuses one that holds anything else.
+
+- If the file is present, then `require_built_image` in `src/run.rs` refuses an
+  image that the store holds under another ID, and the panel shows the short
+  ID.
+- If the file is absent, then the panel says that the identity is unchecked.
+
+In both cases the installer reads the whole image back out of the store before
+the cut. A layer file that no longer matches its layer's record fails that
+read, so the install is refused with the disk untouched. podman buffers one
+layer at a time in `TMPDIR` during the read, so the read needs free space there
+as large as the image's largest layer.
 
 ### A field the installer does not implement is refused
 
@@ -122,8 +141,7 @@ that does not ship it exits 3 from the probe, which is the skip.
 
 Two more probes read paths no vendor owns. `require_tpm2_enrolment` runs
 `/usr/bin/systemd-cryptenroll` in the image, because the image enrols that token
-itself on its first boot. **It is the second refusal that runs before the cut**,
-and it runs for every `tpm2-` kind and wherever a manual layout opened a
+itself on its first boot. **It refuses before the cut**, and it runs for every `tpm2-` kind and wherever a manual layout opened a
 container with TPM2. `image_gb` in
 `src/payload.rs` sizes the smallest root the install accepts with `podman image
 inspect`, which runs no container.
@@ -148,3 +166,9 @@ in `src/tests/recipe.rs` adds `varDisk` to an emitted recipe and asserts the
 refusal names it. `a_plan_the_payload_cannot_answer_refuses_before_the_cut` in
 `src/tests/layout.rs` holds the whole-disk refusals. A change that adds a sixth
 required field breaks the first test.
+
+`the_recorded_image_id_is_read_beside_the_recipe` in `src/tests/payload.rs`
+holds the `image-id` reader. `an_image_under_another_id_is_refused` and
+`an_altered_image_byte_fails_the_read_back` beside it build an image in a store
+of their own with `podman import`, and the second alters one byte of its layer
+file before it reads the image back.

@@ -62,7 +62,7 @@ echo "lint: the installer does what it did"
 # literal in the built binary is the one reliable tell: `format!` stores the
 # pieces either side of the hole, a plain string stores the hole. This caught
 # `lock.rs`'s second refusal, which two tests passed straight through.
-cargo build --quiet
+cargo build --quiet --locked
 if strings target/debug/tect-installer | grep -n '{PROGRAM}'; then
     echo "lint: a message carries {PROGRAM} uninterpolated, so it is not in a format!" >&2
     exit 1

@@ -7,6 +7,13 @@ const STORAGE_CONF: &str = "/etc/containers/storage.conf";
 /// A failed draw never fails the install, so no call here uses `?` on the
 /// region.
 pub fn run(payload: &Payload, answers: &mut Answers, prompt: &Prompt) -> Result<(), String> {
+    validate_recipe(payload)?;
+    if !portable_name(&answers.user) {
+        return Err(copy::account_name(&answers.user));
+    }
+    let password_hash = hashed(&answers.password)?;
+    // The checks below run the image, so they wait until its bytes are proved.
+    require_built_image(payload, prompt)?;
     require_signed_boot_chain(&payload.image, &payload.boot)?;
     // A TPM2 answer stages an enrolment the image performs on its own first
     // boot. This is the last moment before a write that can refuse an image
@@ -14,11 +21,6 @@ pub fn run(payload: &Payload, answers: &mut Answers, prompt: &Prompt) -> Result<
     if answers.opened == Opened::Tpm2 || answers.encryption.kind.starts_with("tpm2-") {
         require_tpm2_enrolment(&payload.image)?;
     }
-    validate_recipe(payload)?;
-    if !portable_name(&answers.user) {
-        return Err(copy::account_name(&answers.user));
-    }
-    let password_hash = hashed(&answers.password)?;
     // The disk stays cut, open and mounted until `prepared` drops, on every
     // way out of this function, the panic path included.
     let mut prepared = prepare(payload, answers)?;
@@ -29,6 +31,78 @@ pub fn run(payload: &Payload, answers: &mut Answers, prompt: &Prompt) -> Result<
             false => why,
         }
     })
+}
+
+/// Refuses an image the media was not built to install, then reads the whole
+/// image back before the first write to the disk. The read lasts as long as
+/// the image is large, so a drawn run shows it as a step.
+fn require_built_image(payload: &Payload, prompt: &Prompt) -> Result<(), String> {
+    match &payload.image_id {
+        Some(recorded) => {
+            let inspected = inspect(&payload.image, "{{.Id}}")
+                .output()
+                .map_err(|err| format!("podman: {err}, and it is what checks the image ID"))?;
+            same_image(&payload.image, recorded, &inspected)?;
+        }
+        // A drawn run states this in the panel, which a run that draws
+        // nothing never shows.
+        None if !prompt.draws() => eprintln!(
+            "{PROGRAM}: {} {}",
+            copy::PANEL_IMAGE_ID,
+            copy::IMAGE_ID_UNRECORDED
+        ),
+        None => {}
+    }
+    let mut child = read_back(&payload.image)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| format!("podman: {err}, and it is what reads the image back"))?;
+    // A full pipe would stop podman until the installer read it, so a thread
+    // drains it while the loop below waits.
+    let pipe = child.stderr.take().expect("stderr was piped at spawn");
+    let drained = std::thread::spawn(move || {
+        let mut pipe = pipe;
+        let mut said = String::new();
+        std::io::Read::read_to_string(&mut pipe, &mut said).map(|_| said)
+    });
+    let mut region = match prompt.draws() {
+        true => common::ui::Progress::open(copy::READING_BACK_FOOT).ok(),
+        false => None,
+    };
+    match &mut region {
+        Some(region) => {
+            let _ = region.step(0, 100, copy::READING_BACK);
+        }
+        None => eprintln!("{PROGRAM}: {}", copy::READING_BACK),
+    }
+    let waited = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) => {
+                if let Some(region) = &mut region {
+                    let _ = region.tick();
+                }
+                std::thread::sleep(TICK);
+            }
+            Err(err) => break Err(err),
+        }
+    };
+    if let Some(region) = region {
+        region.close();
+    }
+    let status = waited.map_err(|err| {
+        let stopped = match child.kill() {
+            Ok(()) => String::new(),
+            Err(kill) => format!(", and stopping it failed too: {kill}"),
+        };
+        format!("podman: {err}, and it is what reads the image back{stopped}")
+    })?;
+    let stderr = drained
+        .join()
+        .map_err(|_| "podman: the thread reading its errors stopped".to_string())?
+        .map_err(|err| format!("podman: {err}"))?;
+    read_whole(&payload.image, status, &stderr)
 }
 
 /// Every failure here follows the disk cut, which `run` reports to the user.

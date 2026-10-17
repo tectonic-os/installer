@@ -631,6 +631,10 @@ pub fn logging(log: Option<&std::path::Path>) -> String {
 /// A user watching an install cannot ask for two facts. This line says that
 /// the disk is being overwritten and where the transcript is. It stays short,
 /// because it draws as one line inside a box.
+pub const PANEL_IMAGE_ID: &str = "image id";
+pub const IMAGE_ID_UNRECORDED: &str = "not recorded, so unchecked";
+pub const READING_BACK: &str = "Reading the image back before the disk is written";
+pub const READING_BACK_FOOT: &str = "no disk written yet; Ctrl+C stops the install here";
 pub fn writing(log: Option<&std::path::Path>) -> String {
     match log {
         Some(at) => format!("disk being overwritten; log: {}", at.display()),

@@ -76,6 +76,9 @@ fn require_sfdisk() {
     assert!(output.status.success(), "sfdisk --version failed");
 }
 
+/// Holds the image ID `a_payload` records.
+const AN_IMAGE_ID: &str = "30ecbe1509090b38ef3260f3609d64d8261230464eaa4d235901db496e9647fb";
+
 /// Holds the payload the form tests ask their questions against. The image,
 /// hostname, filesystem and bootloader match `EMITTED`, which describes the
 /// same Debian target.
@@ -84,6 +87,7 @@ fn a_payload() -> Payload {
         recipe: "/mnt/tect/install-recipe.json".into(),
         install: an_install_recipe(),
         image: "ghcr.io/tectonic-os/deb2:latest".to_string(),
+        image_id: ImageId::parse(AN_IMAGE_ID),
         hostname: "deb2".to_string(),
         filesystem: "ext4".to_string(),
         bootloader: "grub2".to_string(),
@@ -193,3 +197,108 @@ const EMITTED: &str = r#"{
   "user": { "groups": ["sudo"] },
   "additionalImageStores": ["/var/lib/tectonic/store"]
 }"#;
+
+/// Builds a one-layer image in a store of its own, with no network. The tar
+/// is owned by root, so a rootless store maps its file to the user running
+/// the test, who can then alter it.
+fn imported_store(name: &str) -> (PathBuf, PathBuf) {
+    let root = scratch(name);
+    let tree = root.join("tree/bin");
+    std::fs::create_dir_all(&tree).expect("a layer tree");
+    std::fs::write(tree.join("payload"), "the bytes the image was built with\n")
+        .expect("a layer file");
+    let tar = root.join("rootfs.tar");
+    let packed = Command::new("tar")
+        .args(["--owner=0", "--group=0", "-C"])
+        .arg(root.join("tree"))
+        .arg("-cf")
+        .arg(&tar)
+        .arg(".")
+        .status()
+        .expect("tar runs");
+    assert!(packed.success(), "tar packs the layer");
+    let conf = root.join("storage.conf");
+    // Some rootless podman releases ignore `graphroot` and read
+    // `rootless_storage_path`, so both name the scratch store.
+    std::fs::write(
+        &conf,
+        format!(
+            "[storage]\ndriver = \"vfs\"\ngraphroot = \"{0}/graph\"\n\
+             rootless_storage_path = \"{0}/graph\"\nrunroot = \"{0}/run\"\n",
+            root.display()
+        ),
+    )
+    .expect("a storage.conf");
+    let imported = Command::new("podman")
+        .env("CONTAINERS_STORAGE_CONF", &conf)
+        .args(["import", "--quiet"])
+        .arg(&tar)
+        .arg(STORED)
+        .output()
+        .expect("podman is required by the image check tests");
+    assert!(
+        imported.status.success(),
+        "podman import: {}",
+        String::from_utf8_lossy(&imported.stderr)
+    );
+    (root, conf)
+}
+
+const STORED: &str = "example.invalid/payload:1";
+
+/// Runs `command` against the store `conf` names.
+fn in_store(mut command: Command, conf: &Path) -> std::process::Output {
+    command
+        .env("CONTAINERS_STORAGE_CONF", conf)
+        .output()
+        .expect("podman runs")
+}
+
+/// Flips one bit of the layer file `imported_store` wrote.
+fn alter_layer(root: &Path) {
+    let layer_file = find_file(&root.join("graph"), "payload").expect("the stored layer file");
+    let mut bytes = std::fs::read(&layer_file).expect("the stored layer file reads");
+    bytes[4] ^= 1;
+    std::fs::write(&layer_file, bytes).expect("the stored layer file is altered");
+}
+
+fn find_file(dir: &Path, name: &str) -> Option<PathBuf> {
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let path = entry.path();
+        if path.is_dir() && !path.is_symlink() {
+            if let Some(found) = find_file(&path, name) {
+                return Some(found);
+            }
+        } else if path.file_name().is_some_and(|file| file == name) {
+            return Some(path);
+        }
+    }
+    None
+}
+
+/// The store holds files only the user namespace podman runs in can remove.
+fn remove_store(root: &Path) {
+    let removed = Command::new("podman")
+        .args(["unshare", "rm", "-rf"])
+        .arg(root)
+        .status()
+        .expect("podman runs");
+    assert!(removed.success(), "the scratch store is removed");
+}
+
+/// Holds the answers the install cases run with.
+fn answered(kind: &str, passphrase: &str) -> Answers {
+    Answers {
+        disk: "/dev/vda".to_string(),
+        hostname: "host".to_string(),
+        user: "user".to_string(),
+        password: "secret".to_string(),
+        encryption: Encryption {
+            kind: kind.to_string(),
+            passphrase: passphrase.to_string(),
+            pin: String::new(),
+        },
+        layout: None,
+        opened: Opened::Keep,
+    }
+}

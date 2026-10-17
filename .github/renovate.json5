@@ -13,6 +13,10 @@
   "rebaseWhen": "never",
   "timezone": "Etc/UTC",
   "schedule": ["before 6am"],
+  // Renovate proposes a release only after it has stood for a week, so a
+  // compromised release can be yanked before an automerge takes it. Renovate
+  // holds back a release that carries no timestamp.
+  "minimumReleaseAge": "7 days",
 
   "packageRules": [
     {
@@ -21,10 +25,10 @@
       "automerge": true,
     },
     {
-      // The release workflow builds in `centos-bootc:stream10` because it
-      // carries the oldest glibc of any rpm row in `COVERAGE.md`, and that
-      // glibc is the floor of every released binary. An automerged bump of
-      // the build base raises the floor with nobody reading it. The release
+      // The release workflow builds in `centos-bootc:stream10` because its
+      // glibc is the oldest of the supported rpm bases, and that glibc is the
+      // floor of every released binary. An automerged bump of the build base
+      // raises the floor without a review. The release
       // workflow asserts the floor as well, so this rule removes the noise
       // rather than the guard.
       "matchDepTypes": ["container"],

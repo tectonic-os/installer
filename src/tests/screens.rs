@@ -161,7 +161,7 @@ fn the_install_form_snapshots_blocked_and_ready_states() {
     assert_style_at(
         &rendered,
         4,
-        17,
+        18,
         "fg: Rgb(238, 111, 248), bg: Reset, underline: Reset, modifier: BOLD",
         "the selected hostname row",
     );
