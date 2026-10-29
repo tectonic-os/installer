@@ -12,7 +12,7 @@ permissions: {}
 
 jobs:
   typed-title:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       # The title comes from the pull request author, so it reaches the script
       # through the environment and never through the script text. The squash

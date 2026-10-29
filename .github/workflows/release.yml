@@ -163,7 +163,7 @@ jobs:
   # Two jobs calling `gh release create` for one tag race each other.
   release:
     needs: build
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     # The scopes live on this job alone. It compiles nothing and runs no
     # third-party build script.
     permissions:
@@ -172,7 +172,7 @@ jobs:
       attestations: write
     steps:
       - name: Collect both architectures
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           merge-multiple: true
 
